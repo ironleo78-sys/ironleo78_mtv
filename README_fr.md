@@ -45,20 +45,54 @@ chanson -> MTV (Save Latent ON) -> extraits + .latent / .conditioning
                                       '-> Revitalizer -> extrait upscalé
 ```
 
+## Testé
+
+**Testé par l'auteur dans un ComfyUI réel : les trois nodes (MTV, Model Loader, 2in1 Revitalizer) fonctionnent comme décrit ici.** Il s'agit toujours d'une version pré-alpha (v0.01) : signalez tout comportement étrange.
+
 ## Installation
 
 1. Placez le dossier `ironleo78_mtv` (avec `__init__.py` directement à l'intérieur) dans `ComfyUI/custom_nodes/`.
 2. Redémarrez ComfyUI, puis rafraîchissez le navigateur à fond (Ctrl+F5).
 3. Clic droit sur le canevas, **Add Node > IronLeo78 > MTV**.
 
-**Il vous faut :**
+## Prérequis (toutes les dépendances)
 
-- ComfyUI avec ses propres nodes **MiniMax H3**. PyAV, torchaudio et safetensors sont livrés avec ComfyUI. Aucun paquet pip supplémentaire.
-- Les fichiers de modèles H3 dans les dossiers habituels : `diffusion_models`, `loras`, `text_encoders`, `vae`.
-- **Seulement pour l'étape d'upscale du Revitalizer :** le node tiers *Comfyui_Minimax_h3_latent_Upscaler* et son modèle :
-  `cd ComfyUI/custom_nodes && git clone https://github.com/LBH-123-AI/Comfyui_Minimax_h3_latent_Upscaler.git`
-  puis placez `h3_upscaler_lms_v0.1.safetensors` dans `ComfyUI/models/latent_upscale_models/`. Le Revitalizer l'appelle par son nom et ne l'inclut pas (MIT, (c) LBH-123-AI). Sans lui, mettez Upscale sur OFF dans le Revitalizer.
-- Les poids Hybrid Demucs (environ 320 Mo) se téléchargent tout seuls la première fois qu'un Audio Stem est utilisé.
+**ComfyUI** doit être assez récent pour inclure ce qui suit, car le pack l'appelle par son nom :
+
+| Requis | Utilisé par |
+|---|---|
+| Nodes MiniMax H3 (`comfy_extras.nodes_minimax_h3` : Reference to Video, Add Guide) | MTV |
+| `LTXVSeparateAVLatent`, `LTXVConcatAVLatent` | MTV, Revitalizer |
+| `CreateVideo`, `SaveVideo`, les types vidéo `comfy_api.latest` | MTV, Revitalizer |
+| `ModelAttentionBackend` (optionnel : le pack retombe sur l'attention PyTorch) | MTV, Revitalizer |
+| Samplers et chargeurs natifs : `RandomNoise`, `BasicGuider`, `BasicScheduler`, `KSamplerSelect`, `SamplerCustomAdvanced`, `UNETLoader`, `LoraLoaderModelOnly`, `CLIPLoader`, `VAELoader`, `VAEDecode`, `VAEDecodeAudio`, `VAEEncodeAudio`, `TrimAudioDuration`, `SolidMask`, `SetLatentNoiseMask` | MTV, Revitalizer |
+
+**Paquets Python.** Rien à installer : `torch`, `torchaudio`, `numpy`, `Pillow`, `PyAV` (`av`), `safetensors` et `aiohttp` sont tous livrés avec ComfyUI. `einops` et ffmpeg ne sont **pas** nécessaires.
+
+**Node tiers (étape d'upscale du Revitalizer seulement) :** *Comfyui_Minimax_h3_latent_Upscaler*
+
+```
+cd ComfyUI/custom_nodes
+git clone https://github.com/LBH-123-AI/Comfyui_Minimax_h3_latent_Upscaler.git
+```
+
+Redémarrez ComfyUI ensuite. Le Revitalizer l'appelle par son nom et ne l'inclut pas (MIT, (c) LBH-123-AI). Sans lui, mettez Upscale sur OFF dans le Revitalizer.
+
+**Fichiers de modèles** (présélectionnés par défaut s'ils sont installés ; choisissez-en d'autres dans le Model Loader) :
+
+| Fichier | Dossier |
+|---|---|
+| `minimax_h3_ref2va_pruned_int8_convrot.safetensors` (modèle de diffusion) | `models/diffusion_models/` |
+| `minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors` (LoRA Turbo) | `models/loras/` |
+| `H3_Unlocked_V2.safetensors` (LoRA personnalisée, optionnelle, OFF par défaut) | `models/loras/` |
+| `qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors` (encodeur de texte) | `models/text_encoders/` |
+| `minimax_h3_video_vae_int8_convrot.safetensors` (VAE vidéo) | `models/vae/` |
+| `minimax_h3_audio_vae_fp32.safetensors` (VAE audio) | `models/vae/` |
+| `h3_upscaler_lms_v0.1.safetensors` (upscale du Revitalizer seulement) | `models/latent_upscale_models/` |
+
+**Téléchargé automatiquement :** les poids Hybrid Demucs (environ 320 Mo, dans `~/.cache/torch/hub/checkpoints/`) la première fois qu'un Audio Stem est utilisé. Une connexion internet est nécessaire une seule fois.
+
+**Structure du dossier :**
 
 ```
 ComfyUI/custom_nodes/ironleo78_mtv/
@@ -196,6 +230,6 @@ node   tests/test_migration.mjs
 node   tests/test_panel_jsdom.mjs      # nécessite : npm install jsdom
 ```
 
-Ces tests s'exécutent contre des doublures de ComfyUI. Cette version pré-alpha n'a pas encore été lancée dans un ComfyUI réel : signalez tout comportement étrange que vous observez.
+Ces tests s'exécutent contre des doublures de ComfyUI, donc aucun GPU n'est nécessaire.
 
 par IronLeo78
