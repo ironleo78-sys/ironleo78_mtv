@@ -1,0 +1,13 @@
+[project]
+name = "ironleo78-mtv"
+description = "Music-video clips synced to your own audio (MiniMax H3): MTV node, Model Loader and 2in1 Revitalizer."
+version = "0.0.1"
+license = { file = "LICENSE" }
+readme = "README.md"
+
+[project.urls]
+Repository = "https://github.com/ironleo78-sys/ironleo78_mtv"
+
+[tool.comfy]
+PublisherId = "ironleo78"
+DisplayName = "IronLeo78 MTV"
