@@ -9,5 +9,5 @@ dependencies = []
 Repository = "https://github.com/ironleo78-sys/ironleo78_mtv"
 
 [tool.comfy]
-PublisherId = "YOUR_PUBLISHER_ID"
+PublisherId = "ironleo78"
 DisplayName = "IronLeo78 MTV"
