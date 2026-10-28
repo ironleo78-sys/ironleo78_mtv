@@ -1,9 +1,11 @@
+// v0.0.2: workflow migration now looks at the saved values, not at how many there are (it used to shift the Model Loader's
+//         steps / seed out of place on every load + save). A Model Loader whose numbers are already damaged is repaired on load.
 // v0.6: the Latent Upscale stage is gone. "Latent Upscale", "Temporal Chunking", "upscale_megapixels", "Upscale Quality" and
 //       "Upscale Output" were removed and "Save Latent" (OFF / ON) took the place of "Latent Upscale". A workflow saved with
 //       0.5 or older still holds the old values: migrateMakerValues (below) drops the removed ones and maps the old switch
 //       (Latent Upscale OFF = the latents were saved) to Save Latent. The Model Loader lost "upscale_model_name" the same way
 //       (migrateLoaderValues).
-// IronLeo78 MTV (v0.01): segment panel (count, next, progress, Reset, Jump / Latest), always-visible
+// IronLeo78 MTV (v0.0.2): segment panel (count, next, progress, Reset, Jump / Latest), always-visible
 // labelled picture thumbnails and a status box.
 // The segment panel is the FIRST widget and the status box the LAST. Thumbnails are display only: never
 // serialized, never sent to the backend. The segment counter decides where cutting starts (there are no
@@ -50,13 +52,18 @@ const SEG_WIDGETS = [
 // Returns the values in the new order, or null when the workflow already is in the new format (or is not recognised).
 const OLD_UPSCALE_BLOCK_05 = ["Latent Upscale", "Temporal Chunking", "upscale_megapixels", "Upscale Quality"];
 const OLD_UPSCALE_BLOCK_04 = ["Latent Upscale", "upscale_megapixels"];
+// v0.0.2: the old format is recognised by WHAT the values are, never by how many there are. ComfyUI's frontend does not
+// always list every saved value as a widget name (the "control after generate" and upload-button values are saved
+// without being in `names`), so counting values made the migration fire on workflows that were already in the new
+// format and shift the Model Loader's steps / seed out of place.
 export function migrateMakerValues(names, vals) {
   if (!Array.isArray(vals) || !names.includes("Save Latent") || names.includes("Latent Upscale")) return null;
-  const extra = vals.length - names.length;
+  const at = names.indexOf("Save Latent");
+  const next = vals[at + 1], after = vals[at + 2];
   let block, tail;
-  if (extra === 4) { block = OLD_UPSCALE_BLOCK_05; tail = ["Upscale Output"]; }        // saved with 0.5
-  else if (extra === 2) { block = OLD_UPSCALE_BLOCK_04; tail = ["Upscale Output"]; }   // saved with 0.4.1 or older
-  else return null;
+  if (typeof next === "boolean" && typeof after === "number") { block = OLD_UPSCALE_BLOCK_05; tail = ["Upscale Output"]; }   // saved with 0.5: ... Temporal Chunking (bool), upscale_megapixels (number)
+  else if (typeof next === "number") { block = OLD_UPSCALE_BLOCK_04; tail = ["Upscale Output"]; }                           // saved with 0.4.1 or older: Latent Upscale, upscale_megapixels (number)
+  else return null;                                                                                                       // new format: Save Latent, Guide (bool), picture_1 (text)
   // the old list = the new one with "Save Latent" replaced by the old block, and "Upscale Output" right after "Guide"
   const oldNames = [];
   for (const n of names) {
@@ -64,20 +71,41 @@ export function migrateMakerValues(names, vals) {
     else if (n === "Guide") oldNames.push(n, ...tail);
     else oldNames.push(n);
   }
-  if (oldNames.length !== vals.length) return null;
+  if (vals.length < oldNames.length) return null;
   const old = {};
   oldNames.forEach((n, i) => { old[n] = vals[i]; });
   // old "Latent Upscale" OFF meant "the first-pass latent and conditioning are saved" -> Save Latent ON
   return names.map((n) => (n === "Save Latent" ? old["Latent Upscale"] === false : old[n]));
 }
 
+// A Model Loader saved with 0.5 or older has one value more, "upscale_model_name" (text), right after "audio_vae_name";
+// in the current format a number (turbo_steps) sits there.
 export function migrateLoaderValues(names, vals) {
   if (!Array.isArray(vals) || names.includes("upscale_model_name")) return null;
   const at = names.indexOf("audio_vae_name");
-  if (at < 0 || vals.length !== names.length + 1) return null;
+  if (at < 0) return null;
+  if (!(typeof vals[at + 1] === "string" && typeof vals[at + 2] === "number")) return null;
   const out = vals.slice();
-  out.splice(at + 1, 1);                 // the old "upscale_model_name" sat right after "audio_vae_name"
+  out.splice(at + 1, 1);
   return out;
+}
+
+// Repairs a Model Loader whose numbers were damaged (for example by the old migration bug: steps / seed saved as "fixed").
+// Returns the repaired list, or null when nothing was wrong. The defaults are the Model Loader's own.
+const LOADER_DEFAULTS = { custom_lora_strength: 0.65, turbo_steps: 4, full_steps: 25, noise_seed: 1978 };
+export function repairLoaderValues(names, vals) {
+  if (!Array.isArray(vals)) return null;
+  const out = vals.slice();
+  let changed = false;
+  for (const [key, def] of Object.entries(LOADER_DEFAULTS)) {
+    const i = names.indexOf(key);
+    if (i < 0 || i >= out.length) continue;
+    const v = out[i];
+    if (typeof v !== "number" || !Number.isFinite(v)) { out[i] = def; changed = true; }
+  }
+  const e = names.indexOf("custom_lora_enabled");
+  if (e >= 0 && e < out.length && typeof out[e] !== "boolean") { out[e] = false; changed = true; }
+  return changed ? out : null;
 }
 
 function serializedWidgets(node) {
@@ -602,6 +630,7 @@ app.registerExtension({
     node.onConfigure = function (info) {
       try {
         applyMigration(this, info, migrateLoaderValues);
+        applyMigration(this, info, repairLoaderValues);
       } catch (e) {
         console.warn("[IronLeo78] Model Loader migration skipped:", e);
       }

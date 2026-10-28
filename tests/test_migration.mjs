@@ -13,7 +13,7 @@ fs.mkdirSync(path.join(tmp, "scripts")); fs.mkdirSync(path.join(tmp, "ext", "web
 fs.writeFileSync(path.join(tmp, "scripts", "app.js"), "export const app = { registerExtension() {}, graph: { _nodes: [] } };\n");
 fs.writeFileSync(path.join(tmp, "scripts", "api.js"), "export const api = { apiURL: (p) => p, addEventListener() {}, removeEventListener() {}, async fetchApi() { return { json: async () => ({}) }; } };\n");
 fs.copyFileSync(path.join(here, "..", "web", "ironleo78_mtv.js"), path.join(tmp, "ext", "web", "ext.mjs"));
-const { migrateMakerValues, migrateLoaderValues } = await import(pathToFileURL(path.join(tmp, "ext", "web", "ext.mjs")).href);
+const { migrateMakerValues, migrateLoaderValues, repairLoaderValues } = await import(pathToFileURL(path.join(tmp, "ext", "web", "ext.mjs")).href);
 
 let fails = 0;
 const check = (c, m) => { if (!c) { fails++; console.log("  FAIL -", m); } else console.log("  ok -", m); };
@@ -52,6 +52,29 @@ check(same(migrateLoaderValues(LOADER, oldLoader),
   ["u.safetensors", false, "None", 0.65, "t.safetensors", "q.safetensors", "v.safetensors", "a.safetensors", 4, 25, 1978, "fixed"]),
   "the upscale model value is dropped, steps and seed keep their values");
 check(migrateLoaderValues(LOADER, oldLoader.filter((_, i) => i !== 8)) === null, "a new-format Model Loader is left alone");
+
+console.log("5. v0.0.2: the real frontend does NOT list the control_after_generate value among the widget names");
+const LOADER_NOCTL = LOADER.slice(0, 11);                       // 11 names, but 12 saved values
+const cur = ["u.safetensors", false, "H3.safetensors", 0.64, "t.safetensors", "q.safetensors", "v.safetensors", "a.safetensors", 8, 30, 2026, "fixed"];
+check(migrateLoaderValues(LOADER_NOCTL, cur) === null, "a current-format Model Loader (12 values, 11 names) is NOT migrated (this shifted steps / seed before)");
+let v = cur;
+for (let i = 0; i < 4; i++) { const m = migrateLoaderValues(LOADER_NOCTL, v); if (m) v = m; }
+check(same(v, cur), "loading + saving it again and again never changes a value");
+check(migrateLoaderValues(LOADER_NOCTL, oldLoader) !== null && migrateLoaderValues(LOADER_NOCTL, oldLoader).length === 12,
+  "a real 0.5 Model Loader is still migrated (upscale model dropped)");
+const NEW_UPLOAD = [...head, true, false, ...pics, "image"];     // an upload-button value saved at the end
+check(migrateMakerValues(NEW, NEW_UPLOAD) === null, "a current-format MTV with an extra upload value is left alone");
+check(same(migrateMakerValues(NEW, [...head, false, true, 0.4, "HIGH", true, "Upscaled only", ...pics, "image"]), [...head, true, true, ...pics]),
+  "a 0.5 MTV that also has an upload value is still migrated");
+
+console.log("6. repairing a Model Loader whose numbers were damaged");
+const damaged = ["u.safetensors", false, "H3.safetensors", 0.64, "t.safetensors", "q.safetensors", "v.safetensors", "a.safetensors", "fixed", "fixed", "fixed", "fixed"];
+check(same(repairLoaderValues(LOADER, damaged), ["u.safetensors", false, "H3.safetensors", 0.64, "t.safetensors", "q.safetensors", "v.safetensors", "a.safetensors", 4, 25, 1978, "fixed"]),
+  "steps and seed saved as 'fixed' come back as 4 / 25 / 1978, everything else stays");
+check(repairLoaderValues(LOADER, cur) === null, "a healthy Model Loader is left alone");
+check(same(repairLoaderValues(LOADER, [...cur.slice(0, 3), "x", ...cur.slice(4)])?.[3], 0.65) && repairLoaderValues(LOADER, [...cur.slice(0, 1), "yes", ...cur.slice(2)])?.[1] === false,
+  "a damaged LoRA strength / switch is reset too");
+check(repairLoaderValues(LOADER, undefined) === null, "missing values are left alone");
 
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log(fails ? `\n${fails} FAILED` : "\nALL MIGRATION CHECKS PASSED");

@@ -1,5 +1,5 @@
 """
-IronLeo78 MTV  v0.01  (pre-alpha)
+IronLeo78 MTV  v0.0.2  (pre-alpha)
 ------------------------------------------------------------
 Makes a music video clip by clip, synced to YOUR audio (a singer / musician performance track).
 Loader + MiniMax H3 reference-to-video conditioning + sampling + decode + save, in ONE node, one clip per Run.
@@ -76,7 +76,7 @@ from . import stems as _stems
 from . import conditioning_io as _cond_io
 log = logging.getLogger("IronLeo78.MTV")
 
-VERSION = "0.01"
+VERSION = "0.0.2"
 
 NONE_CHOICE = "None"       # empty selection for every file slot
 NONE_LORA = NONE_CHOICE
@@ -2700,4 +2700,4 @@ class IronLeo78_MTV:
 _register_routes()
 
 NODE_CLASS_MAPPINGS = {"IronLeo78_MTV": IronLeo78_MTV}
-NODE_DISPLAY_NAME_MAPPINGS = {"IronLeo78_MTV": "IronLeo78 MTV (v0.01)"}
+NODE_DISPLAY_NAME_MAPPINGS = {"IronLeo78_MTV": "IronLeo78 MTV (v0.0.2)"}

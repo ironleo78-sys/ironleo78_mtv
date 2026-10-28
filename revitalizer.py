@@ -520,7 +520,7 @@ class IronLeo78_2in1_Revitalizer:
         if upscale_on:
             live.start(2, f"{megapixels:g} MP")
             video_l, audio_l = _call("LTXVSeparateAVLatent", av_latent=av)
-            mode = {"mode": "megapixels", "megapixels": float(megapixels)}
+            mode = {"mode": "megapixels", "megapixels": round(float(megapixels), 2)}
             video_l = _call("MinimaxH3LatentUpscaler3D", latent=video_l, model_name=upscale_model, mode=mode,
                             align=ALIGN, enable_temporal_chunking=bool(temporal_chunking),
                             force_unload=bool(force_unload), device=upscale_device, precision=upscale_precision)[0]

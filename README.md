@@ -1,4 +1,4 @@
-# IronLeo78 MTV (v0.01)
+# IronLeo78 MTV (v0.0.2)
 
 **Turn your song into a music video, one clip at a time, without building a 50-node workflow.**
 
@@ -36,7 +36,7 @@ All under **IronLeo78 > MTV**.
 
 | Node | Id | What it does |
 |---|---|---|
-| **IronLeo78 MTV (v0.01)** | `IronLeo78_MTV` | One clip per Run, cut and synced to your song. |
+| **IronLeo78 MTV (v0.0.2)** | `IronLeo78_MTV` | One clip per Run, cut and synced to your song. |
 | **IronLeo78 MTV Model Loader** | `IronLeo78_MTV_ModelLoader` | Optional. Diffusion model, Turbo and custom LoRA, text encoder, VAEs, step counts, seed. |
 | **IronLeo78 2in1 Revitalizer** | `IronLeo78_2in1_Revitalizer` | Upscales and refines a clip from its saved latent + conditioning and saves the video. |
 
@@ -45,20 +45,54 @@ song -> MTV (Save Latent ON) -> clips + .latent / .conditioning
                                    '-> Revitalizer -> upscaled clip
 ```
 
+## Tested
+
+**Tested by the author in a live ComfyUI: all three nodes (MTV, Model Loader, 2in1 Revitalizer) work as described here.** This is still a pre-alpha release (v0.0.2), so please report anything odd you find.
+
 ## Install
 
 1. Put the folder `ironleo78_mtv` (with `__init__.py` directly inside) into `ComfyUI/custom_nodes/`.
 2. Restart ComfyUI, then hard-refresh the browser (Ctrl+F5).
 3. Right-click the canvas, **Add Node > IronLeo78 > MTV**.
 
-**You need:**
+## Requirements (all dependencies)
 
-- ComfyUI with its own **MiniMax H3** nodes. PyAV, torchaudio and safetensors ship with ComfyUI. No extra pip packages.
-- The H3 model files in the usual folders: `diffusion_models`, `loras`, `text_encoders`, `vae`.
-- **Only for the Revitalizer's upscale step:** the third-party node *Comfyui_Minimax_h3_latent_Upscaler* and its model:
-  `cd ComfyUI/custom_nodes && git clone https://github.com/LBH-123-AI/Comfyui_Minimax_h3_latent_Upscaler.git`
-  and put `h3_upscaler_lms_v0.1.safetensors` in `ComfyUI/models/latent_upscale_models/`. The Revitalizer calls it by name and does not bundle it (MIT, (c) LBH-123-AI). Without it, switch the Revitalizer's Upscale OFF.
-- Hybrid Demucs weights (about 320 MB) download by themselves the first time an Audio Stem is used.
+**ComfyUI itself** must be recent enough to include these, since the pack calls them by name:
+
+| Needed | Used by |
+|---|---|
+| MiniMax H3 nodes (`comfy_extras.nodes_minimax_h3`: Reference to Video, Add Guide) | MTV |
+| `LTXVSeparateAVLatent`, `LTXVConcatAVLatent` | MTV, Revitalizer |
+| `CreateVideo`, `SaveVideo`, the `comfy_api.latest` video types | MTV, Revitalizer |
+| `ModelAttentionBackend` (optional: the pack falls back to PyTorch attention) | MTV, Revitalizer |
+| Core samplers and loaders: `RandomNoise`, `BasicGuider`, `BasicScheduler`, `KSamplerSelect`, `SamplerCustomAdvanced`, `UNETLoader`, `LoraLoaderModelOnly`, `CLIPLoader`, `VAELoader`, `VAEDecode`, `VAEDecodeAudio`, `VAEEncodeAudio`, `TrimAudioDuration`, `SolidMask`, `SetLatentNoiseMask` | MTV, Revitalizer |
+
+**Python packages.** None to install: `torch`, `torchaudio`, `numpy`, `Pillow`, `PyAV` (`av`), `safetensors` and `aiohttp` all ship with ComfyUI. `einops` and ffmpeg are **not** needed.
+
+**Third-party node (Revitalizer upscale step only):** *Comfyui_Minimax_h3_latent_Upscaler*
+
+```
+cd ComfyUI/custom_nodes
+git clone https://github.com/LBH-123-AI/Comfyui_Minimax_h3_latent_Upscaler.git
+```
+
+Restart ComfyUI afterwards. The Revitalizer calls it by name and does not bundle it (MIT, (c) LBH-123-AI). Without it, switch the Revitalizer's Upscale OFF.
+
+**Model files** (pre-selected by default when installed; pick others in the Model Loader):
+
+| File | Folder |
+|---|---|
+| `minimax_h3_ref2va_pruned_int8_convrot.safetensors` (diffusion model) | `models/diffusion_models/` |
+| `minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors` (Turbo LoRA) | `models/loras/` |
+| `H3_Unlocked_V2.safetensors` (custom LoRA, optional, OFF by default) | `models/loras/` |
+| `qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors` (text encoder) | `models/text_encoders/` |
+| `minimax_h3_video_vae_int8_convrot.safetensors` (video VAE) | `models/vae/` |
+| `minimax_h3_audio_vae_fp32.safetensors` (audio VAE) | `models/vae/` |
+| `h3_upscaler_lms_v0.1.safetensors` (Revitalizer upscale only) | `models/latent_upscale_models/` |
+
+**Downloaded automatically:** the Hybrid Demucs weights (about 320 MB, into `~/.cache/torch/hub/checkpoints/`) the first time an Audio Stem is used. This needs an internet connection once.
+
+**Folder layout:**
 
 ```
 ComfyUI/custom_nodes/ironleo78_mtv/
@@ -71,6 +105,7 @@ ComfyUI/custom_nodes/ironleo78_mtv/
 ├── requirements.txt
 ├── README.md
 ├── README_fr.md
+├── CHANGELOG.md
 ├── tests/                              (optional)
 └── web/
     ├── ironleo78_mtv.js                (segment panel, thumbnails, status box)
@@ -185,6 +220,10 @@ Fixed inside: 5-step sigmas `0.9231, 0.8780, 0.8000, 0.6316, 0.3158, 0.0000`, al
 | **Revitalizer: "node ... not found"** | The third-party Minimax H3 Latent Upscaler is not installed. Install it, or switch Upscale OFF. |
 | **Revitalizer: out of VRAM** | Lower `megapixels`, switch Upscale OFF, or close other GPU programs. The console prints the failed step and a tip. |
 
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md).
+
 ## Tests (optional, no GPU needed)
 
 ```
@@ -196,6 +235,8 @@ node   tests/test_migration.mjs
 node   tests/test_panel_jsdom.mjs      # needs: npm install jsdom
 ```
 
-These run against stand-ins for ComfyUI. This pre-alpha build has not yet been run inside a live ComfyUI, so please report anything odd you see in the real thing.
+These run against stand-ins for ComfyUI, so they need no GPU.
+
+License: Apache 2.0 (see `LICENSE`).
 
 by IronLeo78

@@ -1,3 +1,3 @@
 # No extra pip packages are needed.
-# torch, torchaudio (Audio Stem / Hybrid Demucs), PyAV and safetensors ship with ComfyUI.
+# torch, torchaudio (Audio Stem / Hybrid Demucs), numpy, Pillow, PyAV (av), safetensors and aiohttp ship with ComfyUI.
 # The Revitalizer's upscale step needs the third-party node Comfyui_Minimax_h3_latent_Upscaler (git clone, see README.md).

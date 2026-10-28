@@ -1,0 +1,13 @@
+[project]
+name = "ironleo78-mtv"
+description = "Music-video clips synced to your own audio (MiniMax H3): the MTV node, the MTV Model Loader and the 2in1 Revitalizer upscaler."
+version = "0.0.2"
+license = { file = "LICENSE" }
+dependencies = [No extra pip packages are needed. torch, torchaudio (Audio Stem / Hybrid Demucs), numpy, Pillow, PyAV (av), safetensors and aiohttp ship with ComfyUI.The Revitalizer's upscale step needs the third-party node Comfyui_Minimax_h3_latent_Upscaler (git clone, see README.md).]
+
+[project.urls]
+Repository = "https://github.com/ironleo78-sys/IronLeo78_MTV"
+
+[tool.comfy]
+PublisherId = "ironleo78"
+DisplayName = "IronLeo78 MTV"

@@ -560,7 +560,7 @@ check(d["kind"] == "clip" and "upscaled_file" not in d and "latent_upscale" not 
 check(len(ROWS[0]["prompt"]) == mod.MANIFEST_PROMPT_CHARS and ROWS[0]["prompt"].endswith("\u2026"), "the CSV prompt stays short, marked with an ellipsis")
 check(ROWS[0]["prompt_json"] == "Song/Song_seg000_A_00001_.json", "manifest row points at the sidecar")
 check("manifest:" in status_of(r) and "full prompt: Song/Song_seg000_A_00001_.json" in status_of(r), "status lists the sidecar of the clip")
-check(mod.VERSION == "0.01", "VERSION is 0.01")
+check(mod.VERSION == "0.0.2", "VERSION is 0.0.2")
 
 # 15 ---- manifest upgrade (v2.5)
 print("15. manifest upgrade")
