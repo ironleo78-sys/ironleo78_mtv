@@ -4,13 +4,15 @@ import importlib.util, json, os, sys, types
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 spec = importlib.util.spec_from_file_location("cio", os.path.join(HERE, "..", "conditioning_io.py"))
-cio = importlib.util.module_from_spec(spec); spec.loader.exec_module(cio)
+cio = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(cio)
 
 ok = 0
 def check(cond, msg):
     global ok
     assert cond, "FAIL: " + msg
-    ok += 1; print("  ok -", msg)
+    ok += 1
+    print("  ok -", msg)
 
 class T:                                   # a fake tensor
     def __init__(self, name): self.name = name
@@ -50,14 +52,18 @@ back, _, lost, _ = roundtrip([[T("x"), {"weird": Odd(), "ok": 1}]])
 check(back[0][1] == {"weird": None, "ok": 1}, "an unsupported object loads back as None, the rest is intact")
 check(len(lost) == 1 and "weird" in lost[0] and "Odd" in lost[0], "and it is reported with its path: %s" % lost)
 try:
-    cio.decode({"__bogus__": 1}, {}); check(False, "unknown node accepted")
+    cio.decode({"__bogus__": 1}, {})
+    check(False, "unknown node accepted")
 except ValueError:
     check(True, "an unknown structure node is refused")
 
 print("4. save_conditioning / load_conditioning glue (torch, comfy, safetensors replaced by in-memory fakes)")
 FILES = {}
-torch = types.ModuleType("torch"); torch.is_tensor = lambda x: isinstance(x, T)
-comfy = types.ModuleType("comfy"); cu = types.ModuleType("comfy.utils"); comfy.utils = cu
+torch = types.ModuleType("torch")
+torch.is_tensor = lambda x: isinstance(x, T)
+comfy = types.ModuleType("comfy")
+cu = types.ModuleType("comfy.utils")
+comfy.utils = cu
 def save_torch_file(sd, path, metadata=None): FILES[path] = (dict(sd), dict(metadata or {}))
 cu.save_torch_file = save_torch_file
 st_mod = types.ModuleType("safetensors")
@@ -83,7 +89,8 @@ check(loaded[0][1]["guide"][1] == 3 and loaded[0][1]["reference_latents"][0] is 
       and loaded[0][0].name == "emb'", "load rebuilds the conditioning from the file")
 FILES["/x/foreign.latent"] = ({"latent_tensor": T("z")}, {"format": "pt"})
 try:
-    cio.load_conditioning("/x/foreign.latent"); check(False, "a foreign safetensors file was accepted")
+    cio.load_conditioning("/x/foreign.latent")
+    check(False, "a foreign safetensors file was accepted")
 except ValueError as e:
     check("not an IronLeo78 conditioning file" in str(e), "a file that is not ours is refused with a clear message")
 check(cio.EXTENSION == ".conditioning", "extension is .conditioning")

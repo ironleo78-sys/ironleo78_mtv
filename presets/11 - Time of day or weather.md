@@ -1,0 +1,48 @@
+# SYSTEM
+PRESET 11 - TIME OF DAY OR WEATHER (this preset overrides the generic task choice of the guide above).
+
+The images you receive are, in this order: the reference pictures first (the request names which slots are filled, always use those numbers), then the frames of <Video 1>, the source video. No picture is needed. The new condition is named in the request of the user (for example night, golden hour, overcast, rain, snow, fog, a storm); if it names none, use golden hour. Your job is to write the full six-section rewrite for a target video that is <Video 1> under the new time of day or weather. Nothing else changes: the people, the place, the objects, the motion, the lip-sync, the camera and the timing of <Video 1> stay.
+
+Rules for this preset:
+1. Task type: the summary starts with `[video editing + reference generation + audio reuse]` and then `The target video is an edited version of <Video 1>.` It then says in one sentence which time of day or weather the target video has.
+2. `subject_definitions`:
+   - `<Subject 1>` is the new condition: the sky, the light direction, color and intensity, the shadows, the reflections, wet or snowy surfaces, precipitation, mist or haze, the mood, and what each does to the scene (for example lit windows at night, rain on the ground).
+   - `<Subject 2>` is the content of <Video 1> that stays: the people, the place, the objects and their motion (name them briefly, as seen in the frames).
+   - `<Audio 1>` is the synchronized audio track of <Video 1>, reused as it is.
+3. `retention_analysis`: <Subject 1> is `fully_preserved` (the condition applied in full); <Subject 2> is `partially_preserved` (the same content under the new light and weather); <Video 1> (timing, shots, camera work, pacing and motion) is `fully_preserved`; <Audio 1> is `fully_copy`.
+4. `detailed_description`: begin with one or two sentences that set the condition, then follow <Video 1> shot by shot with the same shot count, cut times, camera movement, framing, positions and timing, describing the people, the place and the objects with the new light and weather on them in every shot, kept consistent from shot to shot. Be as explicit as the guide asks.
+5. Do not add events, characters or camera moves that are not in <Video 1>. Do not change anyone's identity or clothing, and do not move anything: only the light and the weather change (wet clothes and hair are fine in rain).
+6. Keep the description of the original lighting out: only the new one.
+7. Audio: the original audio of <Video 1> is kept (<Audio 1>, the synchronized audio track of <Video 1>, `fully_copy`). Do not invent words: write a line inside `<d>` only when the request of the user quotes it, with the speaker tag of the person who says it; otherwise say that the people keep speaking and moving their mouths exactly as in <Video 1>. In `overall_soundscape` and `non_diegetic_music` describe the sound of <Audio 1> as it is, even when the new look would sound different.
+8. Timing (mandatory): the request lists the exact time of every frame of <Video 1>. Never compute times yourself, copy them from that list. Describe the video as a TIMELINE: after the first sentence of each shot, give a time-stamped action for every visible change, written `At MM:SS.mmm, ...` (movement, gesture, head or gaze turn, expression, mouth opening or closing, object handling, camera move), using the listed frame times, so that the whole length of <Video 1> is covered from the first to the last frame. Compare consecutive frames: if something moves, say what and when. Do not call a shot static or the mouth closed unless the frames really show it; if you cannot tell, describe the pose at the first and last frame and the change between them. A cut is a new `[Shot N] At MM:SS.mmm, ...` at the first frame of the new shot.
+9. If the request of the user adds a detail, apply it on top of this preset. If it contradicts the main change of this preset, the preset wins.
+
+# TASK
+Preset 11 - time of day or weather. Show <Video 1> under the time of day or the weather named in the request below: the same people, place, objects, motion, lip-sync, camera, timing and audio, with only the light and the weather changed. Make the result seamless.
+Extra request from the user, applied on top (name the condition here):
+
+# PROMPT
+Make Video 1 a rainy night.
+
+# I2V SYSTEM
+PRESET 11 - TIME OF DAY OR WEATHER, IMAGE-TO-VIDEO (this preset overrides the generic task choice of the guide above). There is NO source video: never mention <Video 1>. The images you receive are the reference pictures only; the request names which slots are filled, always use those numbers. <Picture 1> is the SCENE: a still image that replaces the source video; it provides the place, the light, the composition, the camera view and the people in it. The new condition is named in the request of the user (night, golden hour, overcast, rain, snow, fog, a storm); if it names none, use golden hour. Your job is to write the full six-section rewrite for a target video that starts from the scene of <Picture 1> under the new time of day or weather, with nothing else changed: the people, the place, the objects, the framing and the camera view stay.
+
+Rules for this preset:
+1. Task type: the summary starts with `[reference generation]` (see rule 7 for audio). It then says in one sentence which time of day or weather the target video has.
+2. `subject_definitions`:
+   - `<Subject 1>` is the new condition: the sky, the light direction, color and intensity, the shadows, the reflections, wet or snowy surfaces, precipitation, mist or haze, the mood, and what each does to the scene.
+   - `<Subject 2>` is the content of <Picture 1> that stays: the people, the place and the objects (name them briefly, as seen).
+3. `retention_analysis`: <Subject 1> is `fully_preserved`; <Subject 2> is `partially_preserved` (the same content under the new light and weather).
+4. `detailed_description`: begin with one or two sentences that set the condition, then one shot, `[Shot 1]`, in the composition of <Picture 1> with the new light and weather on everything, then the timeline of rule 8. Be as explicit as the guide asks.
+5. Do not change anyone's identity or clothing, and do not move anything: only the light and the weather change. Keep the original lighting out of the description: only the new one.
+6. Motion: the pictures are still images, so the action, expressions and gestures come from the request of the user. If it gives none, invent only natural, subtle motion that fits the scene (breathing, blinking, small head turns, small gestures, a mouth that moves a little). The camera stays as framed in <Picture 1> and does not move unless the request asks. Do not add events, characters, objects or cuts that are in neither the pictures nor the request. Do not change anyone's identity or clothing.
+7. Audio: the audio is chosen in the MTV and is not known here. Do not define an `<Audio N>` and do not invent dialogue or music. Write `overall_soundscape` and `non_diegetic_music` as `N/A` unless the request describes sounds. Only when the request mentions speech, lip-sync, a song or an audio track: `<Audio 1>` is the audio track provided by the MTV, add ` + audio reuse` to the task type, give `<Audio 1>` a line in `subject_definitions` and in `retention_analysis` (`fully_copy`), and make the mouth, jaw and facial movement follow `<Audio 1>` (the words themselves are not written, unless the request quotes them inside `<d>` with the speaker tag `<Subject 1> (S1)`).
+8. Timeline (mandatory): the request gives the length of the clip. Describe the clip as a TIMELINE: after the first sentence of the shot, give a time-stamped action for every visible change, written `At MM:SS.mmm, ...` (movement, gesture, head or gaze turn, expression, mouth opening or closing, object handling), one about every 0.5 to 1 second from 00:00.000 up to the end time given in the request, and never after it. Do not stay silent about the middle of the clip. Do not use a cut (a new `[Shot N]`) unless the request asks for one.
+9. If the request of the user adds a detail, apply it on top of this preset. If it contradicts the main change of this preset, the preset wins.
+
+# I2V TASK
+Preset 11 (image to video) - time of day or weather. Use <Picture 1> as the scene and show it under the time of day or the weather named in the request below, keeping the people, the place, the framing and the camera view. The action comes from the request; if it gives none, add only natural, subtle motion. Make the result seamless.
+Extra request from the user, applied on top (name the condition here):
+
+# I2V PROMPT
+Make Picture 1 a rainy night. The character looks at the camera and talks.

@@ -1,5 +1,5 @@
 """
-IronLeo78 MTV  v0.0.2  (pre-alpha)
+IronLeo78 MTV  v0.4.8  (pre-alpha)
 ------------------------------------------------------------
 Makes a music video clip by clip, synced to YOUR audio (a singer / musician performance track).
 Loader + MiniMax H3 reference-to-video conditioning + sampling + decode + save, in ONE node, one clip per Run.
@@ -10,13 +10,16 @@ Loader + MiniMax H3 reference-to-video conditioning + sampling + decode + save, 
             File can drive the frames (Use Video ON) or supply the soundtrack. Up to three reference
             pictures (singer / musician, location ...), megapixel sizing (multiples of 32), Minimax
             frame count.
-  AUDIO     Bypass Minimax is hardcoded: the audio chunk is encoded, frozen (noise mask 0) and joined
-            to the video latent, so the model never invents sound; the picture follows the music.
+  AUDIO     Choose Audio latent = Custom Audio (default) or Audio From Video: the audio chunk is encoded, frozen
+            (noise mask 0) and joined to the video latent, so the model never invents sound; the picture follows
+            the music. MiniMax Audio: no bypass, like the official ref2v template: the model's own latent goes
+            straight to the sampler and the model generates the sound itself.
   SAMPLES   RandomNoise -> BasicGuider -> KSamplerSelect -> BasicScheduler -> SamplerCustomAdvanced,
-            then VAE Decode / VAE Decode Audio, Create Video and Save Video, all inside this node.
+            then VAE Decode / VAE Decode Audio and Create Video, all inside this node. v0.0.5: the node does NOT
+            save the clip any more: Create Video's result leaves on the `video` output (link it to a Save Video node)
+            and the clip's name on the `filename` output (the old file name, without extension).
 
-Upscaling is not done here: switch Save Latent ON and refine / upscale the clip afterwards with the
-IronLeo78 2in1 Revitalizer node of this pack.
+To refine / upscale a clip later: switch Save Latent ON, then use the IronLeo78 2in1 Revitalizer node of this pack.
 
 Where to start (no Start Frame / audio_start widgets)
   The segment counter at the top of the node decides where cutting starts. Segment 1 begins at second 0
@@ -25,17 +28,18 @@ Where to start (no Start Frame / audio_start widgets)
   starts at (N - 1) x segment length. Needs Next Segment On Run = ON to step through the file.
 
 Selectable on the node
-  Turbo                   ON (default) | OFF   (ON: Turbo LoRA, 4 steps. OFF: 25 steps, no Turbo LoRA.)
+  Turbo                   ON (default) | OFF   (ON: Turbo LoRA, 4 steps. OFF: 40 steps, no Turbo LoRA.)
   Use Video / Video File / Custom Audio File / megapixels / duration / Next Segment On Run / prompt
-  Audio Stem              Song | Vocals | Guitars | Drums | Bass   (right under Custom Audio File: which part of
+  Audio Stem              Full | Vocals | Guitars | Drums | Bass   (right under Custom Audio File: which part of
                           the song is used. The first time a stem is chosen for a NEW song, Hybrid Demucs
                           separates all four and saves them to output/<Song>/stems/<Song>_<Stem>.wav; every
                           later Run, and every later session, just reads the file. See stems.py.)
-  Bypassed Audio Latent   Audio From Video | Custom Audio   (which audio is bypassed into the latent
-                          AND stepped through segment by segment)
+  Choose Audio latent   MiniMax Audio | Audio From Video | Custom Audio   (Custom Audio / Audio From Video are
+                          bypassed into the latent; Custom Audio is also stepped through segment by segment)
   Save Latent             OFF (default) | ON
   Guide
-  Picture1-3              reference pictures (with upload buttons and thumbnails)
+  (optional inputs Picture_1 ... Picture_9, IMAGE: the ONLY way to give reference pictures. Always on: a connected input is
+   sent as <Picture n> (numbers count only the connected ones). No picker, no More References switch, no thumbnails. v0.0.9H)
   (models, custom LoRA, step counts, noise seed: on the IronLeo78 MTV Model Loader node, optional input
    "models". Nothing connected = hardcoded defaults, seed 1978.)
 
@@ -60,11 +64,14 @@ import logging
 import math
 import os
 import re
+import shutil
+import sys
+import threading
 
 import numpy as np
 import torch
 import torch.nn.functional as F
-from PIL import Image, ImageOps
+from PIL import Image
 
 import folder_paths
 import comfy.sd
@@ -74,168 +81,33 @@ import nodes as comfy_nodes
 
 from . import stems as _stems
 from . import conditioning_io as _cond_io
+from . import video_orientation as _orient
+from . import video_reader as _reader
+from . import model_cache as _models
+from .consts import _truthy, NONE_CHOICE, RESIZE_METHOD, SCENE_TAG, MANIFEST_FIELDS, VIDEO_EXTS, AUDIO_EXTS
+from .core_call import _core, _preview_scope, _first_output, _core_options, _vae_options      # v0.3.17: moved to core_call.py (v0.4.5: only the names mtv.py and the tests use)
+from .naming import _append_manifest, _clip_prefix, _manifest_path, _project_name, _song_name, _write_sidecar      # v0.3.17: moved to naming.py
+from .media_decode import (_decode_audio, _decode_video, _fit_frame, _minimax_frames, _open_media, _resize, _resolve_video_path, _seek, _shape_video_frame, _target_size, _video_frame_plan)      # v0.3.17: moved to media_decode.py
+from .state import (DATA_DIR, DATA_FILES, GUIDE_FRAME_IDX, LAST_FRAME_FILE, PACK_DIR, SONGS_STATE_KEY, STATE_FILE, _COUNTER_FIELDS, _STATE_LOCK, _clip_from_manifest, _clip_last_frame_array, _clip_saved_near, _counter, _counter_key, _counter_label, _data_dir, _handle_jump, _jump_to, _last_frame_file, _last_frame_of, _load_furthest, _load_index, _load_last_frame, _load_state, _move_old_data, _moved, _reset_state, _save_index, _save_last_frame, _store_counter, _to_int, _write_state)      # moved to state.py (still reachable as mtv.<name>)
+from .settings import (MIN_STEPS, MAX_STEPS, AUDIO_CACHE_MAX_BYTES, COND_CACHE_MAX, CORE_ATTN_NODE, CORE_VAE_NODE, CREDIT, DEFAULT_ATTENTION, DEFAULT_AUDIO_VAE, DEFAULT_CUSTOM_LORA, DEFAULT_CUSTOM_LORA_ENABLED, DEFAULT_CUSTOM_LORA_STR, DEFAULT_DURATION, DEFAULT_FPS, DEFAULT_MEGAPIXELS, DEFAULT_QWEN_VL, DEFAULT_SAVE_LATENT, DEFAULT_SEED, DEFAULT_TURBO_LORA, DEFAULT_TURBO_LORA_STR, DEFAULT_UNET, DEFAULT_VIDEO_VAE, DENOISE, DIVISIBLE_BY, FIXED_SETTINGS, FREE_ROUTE, FULL_STEPS, JUMP_ROUTE, LOADER_DEFAULTS_ROUTE, LORA_SLOTS, MAX_REF_AUDIO_SECONDS, MAX_SEED, MIN_REF_AUDIO_SECONDS, MODELS_TYPE, MODEL_FILE_KEYS, MODEL_STEP_KEYS, NONE_LORA, PICTURES_INPUT, PICTURES_TYPE, PICTURE_INPUT, RESET_DEFAULTS_ROUTE, RESET_ROUTE, SAMPLER_NAME, SAVE_DEFAULTS_ROUTE, SAVE_FORMAT, SAVE_LATENT_MISSING, SCHEDULER_NAME, SEED_CONTROLS, SEGMENT_ROUTE, TURBO_STEPS, VERSION, VIDEO_CODEC, VIDEO_COLOR_SPACE)      # moved to settings.py (still reachable as mtv.<name>)
+from .defaults import (DEFAULTS_FILE, _check_models, _defaults_key_map, _defaults_stamp, _normalize_default, _read_user_defaults, _read_user_seed_control, apply_model_overrides, apply_saved_defaults, clear_user_defaults, factory_defaults, loader_defaults, missing_default_files, save_user_defaults)      # moved to defaults.py (still reachable as mtv.<name>)
+
+try:      # v0.0.5: a quiet stop (all segments done) must not feed anything to a Save Video linked to the outputs
+    from comfy_execution.graph_utils import ExecutionBlocker
+except Exception:      # an old / different ComfyUI: plain None outputs are used instead
+    ExecutionBlocker = None
 log = logging.getLogger("IronLeo78.MTV")
 
-VERSION = "0.0.2"
-
-NONE_CHOICE = "None"       # empty selection for every file slot
-NONE_LORA = NONE_CHOICE
-RESIZE_METHOD = "lanczos"  # images: fixed
-DIVISIBLE_BY = 32          # every width/height is a multiple of 32
-CREDIT = "IronLeo78 MTV"
-
-CORE_ATTN_NODE = "ModelAttentionBackend"
-CORE_CLIP_NODE = "CLIPLoader"
-CORE_VAE_NODE = "VAELoader"
-FALLBACK_ATTN_OPTIONS = ["pytorch attention", "comfy kitchen attention"]
-FALLBACK_CLIP_TYPES = ["stable_diffusion", "minimax"]
-
-# Default values (taken from the reference workflow settings).
-# A file default is only applied if that file is installed, otherwise "None".
-DEFAULT_UNET = "minimax_h3_ref2va_pruned_int8_convrot.safetensors"
-DEFAULT_TURBO_LORA = "minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors"
-DEFAULT_ATTENTION = "comfy kitchen attention"
-DEFAULT_QWEN_VL = "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"
-DEFAULT_VIDEO_VAE = "minimax_h3_video_vae_int8_convrot.safetensors"
-DEFAULT_AUDIO_VAE = "minimax_h3_audio_vae_fp32.safetensors"
-DEFAULT_MEGAPIXELS = 0.2          # v2.7.1 (was 0.5)
-DEFAULT_DURATION = 15.0           # v2.7.1 (was 5.0)
-DEFAULT_CUSTOM_LORA = "H3_Unlocked_V2.safetensors"   # v2.7.1: pre-selected (and ON) when it is installed
-DEFAULT_CUSTOM_LORA_STR = 0.65    # v2.7.1 (was 1.0)
-DEFAULT_CUSTOM_LORA_ENABLED = False   # v2.8.6: OFF by default (the Model Loader can switch it ON)
-MIN_REF_AUDIO_SECONDS = 0.25  # shorter audio can't be encoded by the audio VAE
-MAX_REF_AUDIO_SECONDS = 15.0  # longer audio (a whole song) runs the audio VAE out of memory
-
-# Hardcoded settings: not shown on the node any more.
-FIXED_SETTINGS = {
-    "unet_name": DEFAULT_UNET,
-    "weight_dtype": "default",
-    "turbo_lora_name": DEFAULT_TURBO_LORA,
-    "turbo_lora_strength": 1.0,
-    "custom_lora_enabled": DEFAULT_CUSTOM_LORA_ENABLED,   # v2.8.6: hardcoded; the Model Loader can change all three
-    "custom_lora_name": DEFAULT_CUSTOM_LORA,
-    "custom_lora_strength": DEFAULT_CUSTOM_LORA_STR,
-    "attention_enabled": True,
-    "attention": DEFAULT_ATTENTION,
-    "qwen_vl_name": DEFAULT_QWEN_VL,
-    "qwen_vl_type": "minimax",
-    "qwen_vl_device": "default",
-    "video_vae_name": DEFAULT_VIDEO_VAE,
-    "audio_vae_name": DEFAULT_AUDIO_VAE,
-    "ref_image_size": "match",
-    "Live Preview": True,        # v2.5.1: ComfyUI's latent preview during sampling stays ON (the saved video is never previewed)
-    "force_rate": 24.0,          # always 24 fps
-    "turbo_steps": 4,            # Turbo ON  (the Model Loader can change it)
-    "full_steps": 25,            # Turbo OFF (the Model Loader can change it)
-}
-
-# v2.3: what the optional "models" input (Model Loader) may override. key -> (label, folder)
-MODELS_TYPE = "IRONLEO78_MTV_MODELS"
-MODEL_FILE_KEYS = {
-    "unet_name": ("Diffusion model", "diffusion_models"),
-    "turbo_lora_name": ("Turbo LoRA", "loras"),
-    "qwen_vl_name": ("Qwen3-VL text encoder", "text_encoders"),
-    "video_vae_name": ("Video VAE", "vae"),
-    "audio_vae_name": ("Audio VAE", "vae"),
-}
-MODEL_STEP_KEYS = ("turbo_steps", "full_steps")
-# (the seed, "noise_seed", is read from the Model Loader too, see apply_model_overrides; v2.8.5)
-MIN_STEPS, MAX_STEPS = 1, 200
-
-# Hardcoded sampling / output settings.
-SAMPLER_NAME = "res_multistep"
-SCHEDULER_NAME = "simple"
-DENOISE = 1.0
-VIDEO_COLOR_SPACE = "sRGB"
-VIDEO_CODEC = "h264"          # Create Video
-SAVE_FORMAT = "mp4"
-SAVE_CODEC = "h264"
-SAVE_ENCODING = "auto"
-DEFAULT_FPS = 24.0            # Minimax runs at 24 fps: used everywhere
-DEFAULT_PREFIX = "video/ComfyUI"
-MAX_SEED = 0xFFFFFFFFFFFFFFFF
-DEFAULT_SEED = 1978
-TURBO_STEPS = 4               # Turbo LoRA ON
-FULL_STEPS = 25               # Turbo LoRA OFF (official r2v template path: no LoRA, more steps)
-DEFAULT_SAVE_LATENT = False   # v0.6: the "Save Latent" toggle of a NEW node (OFF: no .latent / .conditioning files)
-
-STATE_FILE = os.path.join(os.path.dirname(__file__), "mtv_state.json")
-LAST_FRAME_FILE = os.path.join(os.path.dirname(__file__), "mtv_last_frame.png")
-GUIDE_FRAME_IDX = 0           # the previous run's last frame guides the very first frame
-
 # v2.8: one clip per Run. The file tag / manifest "scene" value stays "A" so earlier clips and manifests still match.
-SCENE_TAG = "A"
-MANIFEST_NO_SONG = "mtv_manifest.csv"
-MANIFEST_FIELDS = ["timestamp", "song", "segment", "scene",
-                   "start_s", "end_s", "duration_s", "frames", "width", "height", "seed", "turbo",
-                   "pictures", "prompt", "file", "prompt_json", "audio_stem", "latent_file", "conditioning_file"]
 MANIFEST_PROMPT_CHARS = 300   # the CSV shows this much of the prompt; the full text is in the clip's sidecar .json
-
-# v2.2: routing / performance
-COND_CACHE_MAX = 6                         # conditioning A / B + audio latent + headroom
-AUDIO_CACHE_MAX_BYTES = 768 * 1024 * 1024  # a decoded custom audio file is kept in RAM up to this size
-FREE_ROUTE = "/ironleo78/mtv/free"
-SEGMENT_ROUTE = "/ironleo78/mtv/segments"   # v2.5: GET  = segment count + counter
-RESET_ROUTE = "/ironleo78/mtv/reset"        # v2.5: POST = counter back to segment 1
-JUMP_ROUTE = "/ironleo78/mtv/jump"          # v2.6: POST = counter to any segment
-
-VIDEO_EXTS = (".mp4", ".webm", ".mkv", ".mov", ".avi", ".m4v", ".gif")
-AUDIO_EXTS = (".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".opus", ".wma")
-
-
-# ---------------------------------------------------------------------- #
-# model-side helpers
-# ---------------------------------------------------------------------- #
-def _first_output(result):
-    """Normalise V1 tuples and V3 NodeOutput objects to the first output."""
-    if isinstance(result, tuple):
-        return result[0]
-    for attr in ("result", "args"):
-        val = getattr(result, attr, None)
-        if val:
-            return val[0]
-    return result
-
-
-def _core_options(node_name, input_name, fallback):
-    """Read a combo list from a core node so it stays in sync with ComfyUI."""
-    try:
-        cls = comfy_nodes.NODE_CLASS_MAPPINGS[node_name]
-        options = cls.INPUT_TYPES()["required"][input_name][0]
-        if isinstance(options, (list, tuple)) and len(options) > 0:
-            return list(options)
-    except Exception as e:
-        log.debug("Could not read %s.%s: %s", node_name, input_name, e)
-    return list(fallback)
-
-
-def _lora_choices():
-    return [NONE_LORA] + folder_paths.get_filename_list("loras")
-
-
-def _pick_default(choices, wanted):
-    return wanted if wanted in choices else choices[0]
-
-
-def _default_file(choices, wanted):
-    """Preferred default if that file exists in the list, otherwise None."""
-    return wanted if wanted in choices else NONE_CHOICE
-
-
-def _with_none(names):
-    return [NONE_CHOICE] + [n for n in names if n != NONE_CHOICE]
-
-
-def _vae_options():
-    return _core_options(CORE_VAE_NODE, "vae_name", folder_paths.get_filename_list("vae"))
-
 
 # ---- shared stage cache (keeps models loaded while the media part re-runs)
 # v2.2: keyed by stage + settings (file names + mtimes), NOT by node id: two nodes with the same
 # models share one copy, and nothing is left behind per deleted node.
 _CACHE = {}       # stage -> OrderedDict(key -> value)
-_CACHE_LIMIT = {"model": 2}   # every other stage keeps one entry
-_LORA_CACHE = {}  # path -> loaded lora state dict (single entry)
+_CACHE_LIMIT = {"model": 2}   # every other stage keeps one entry (v0.1.5: the 2 models are cheap clones of ONE shared base)
+_LORA_CACHE = collections.OrderedDict()  # path -> loaded lora state dict (v0.1.5: up to LORA_CACHE_MAX, was 1)
+LORA_CACHE_MAX = 4                       # the Turbo LoRA + LoRa_1-3: a chain is read from disk once, not once per rebuild
 _COND_CACHE = collections.OrderedDict()    # conditioning / audio-latent results (small, LRU)
 _AUDIO_CACHE = {}                          # file id -> decoded custom audio (single entry)
 _STEMS_READY = {}                          # file id -> ({stem: wav path}, info): stems known to be on disk
@@ -261,6 +133,73 @@ def _file_id(name):
         return (str(name), int(st.st_mtime_ns), int(st.st_size))
     except Exception:
         return (str(name), None, None)
+
+
+def _picture_input(i):
+    """v0.0.9H: name of the optional IMAGE input of picture slot i (Picture_1 .. Picture_9)."""
+    return PICTURE_INPUT.format(i)
+
+
+def _spread_pictures(kw):
+    """v0.1.19: the one `Pictures` input (list of up to nine pictures) fills the Picture_<n> inputs that are not wired on their own;
+    everything after this point sees the same nine optional inputs as before. Removes `Pictures` from kw."""
+    packed = kw.pop(PICTURES_INPUT, None)
+    if not packed:
+        return
+    for i, img in enumerate(list(packed)[:9], start=1):
+        if img is not None and kw.get(_picture_input(i)) is None:
+            kw[_picture_input(i)] = img
+
+
+def _linked_image(value):
+    """v0.0.9H: an IMAGE coming from another node -> one [1,H,W,3] float picture (or None when nothing is linked).
+    A batch gives its FIRST image (each socket feeds one slot); an alpha channel is dropped; a grey image is widened to RGB."""
+    if value is None:
+        return None
+    img = value
+    if len(img.shape) == 3:                       # [H,W,C] -> [1,H,W,C]
+        img = img[None,]
+    if len(img.shape) != 4:
+        raise RuntimeError(f"expected an IMAGE [batch,height,width,channels], got shape {tuple(img.shape)}")
+    img = img[:1]
+    channels = int(img.shape[-1])
+    if channels == 1:
+        img = img.repeat(1, 1, 1, 3)
+    elif channels >= 3:
+        img = img[..., :3]
+    else:
+        raise RuntimeError(f"expected 1, 3 or 4 channels, got {channels}")
+    return img.float().clamp(0, 1).contiguous()
+
+
+NONE_PICTURE_MARK = "ironleo78_none"   # v0.0.9v: the IronLeo78-MTV-Prompt-Generator sets this attribute on its "NONE" pictures
+_NONE_BG, _NONE_BORDER = 32 / 255.0, 90 / 255.0
+_NONE_PROBES = ((0, 0, _NONE_BG), (511, 511, _NONE_BG), (2, 2, _NONE_BORDER), (509, 509, _NONE_BORDER),
+                (2, 256, _NONE_BORDER), (256, 2, _NONE_BORDER))      # (y, x, value) on the 512x512 placeholder
+
+
+def _is_none_placeholder(value):
+    """v0.0.9v: True for the grey "NONE" picture the IronLeo78-MTV-Prompt-Generator sends from an EMPTY slot (inside its Pictures wire).
+    It is not a reference: the slot counts as empty. Recognised by the loader's mark, else by its look (512x512, the grey
+    background in the corners and the lighter border; a real picture matching all six probes exactly is not expected).
+    Never raises: anything it cannot read is a real picture."""
+    if value is None:
+        return False
+    if getattr(value, NONE_PICTURE_MARK, False) is True:
+        return True
+    try:
+        if tuple(int(x) for x in value.shape) != (1, 512, 512, 3):
+            return False
+        return all(abs(float(value[0, y, x, c]) - want) < 1e-4 for y, x, want in _NONE_PROBES for c in range(3))
+    except Exception:
+        return False
+
+
+def _image_fingerprint(img):
+    """v0.0.9H: identifies the CONTENT of a linked picture for the conditioning cache (the files use name + mtime).
+    v0.0.9m: called with the RESIZED picture (pictures[i]), not the full-resolution one."""
+    arr = img.detach().cpu().numpy()
+    return hashlib.sha1(np.ascontiguousarray(arr).tobytes()).hexdigest()[:20]
 
 
 def _cached(uid, stage, key, builder):
@@ -298,12 +237,28 @@ def _clone_cond(positive):
         return positive
 
 
+def _drop_built_models():
+    """v0.1.5: another base diffusion model is about to load (model_cache.py): the models built on the old one go first.
+    Cleared IN PLACE: a _cached() call that is building right now keeps its reference to this same dict."""
+    if "model" in _CACHE:
+        _CACHE["model"].clear()
+
+
+_models.on_switch(_drop_built_models)
+
+
 def free_cached_models(reason=""):
     """Drop every cached model / conditioning / audio and ask ComfyUI to unload what it holds."""
     _CACHE.clear()
     _LORA_CACHE.clear()
     _COND_CACHE.clear()
     _AUDIO_CACHE.clear()
+    _models.free()      # v0.1.5: the base diffusion model shared with the Revitalizer
+    try:      # v0.1.4: the 2in1 Revitalizer keeps its own model + VAEs between runs too
+        from . import revitalizer as _rev
+        _rev.free_cache()
+    except Exception as e:
+        log.debug("Could not free the Revitalizer's cache: %s", e)
     gc.collect()
     try:
         import comfy.model_management as mm
@@ -315,54 +270,9 @@ def free_cached_models(reason=""):
 
 
 def _register_routes():
-    """POST .../free (the node's JS calls it after the last node was removed),
-    GET .../segments (v2.5: segment count + counter for the node's segment panel),
-    POST .../reset (v2.5: the Reset button), POST .../jump (v2.6: Go / Latest)."""
-    try:
-        from aiohttp import web
-        from server import PromptServer
-        if PromptServer.instance is None:
-            return
-        routes = PromptServer.instance.routes
-
-        @routes.post(FREE_ROUTE)
-        async def _free_route(request):
-            if _RUNNING > 0:
-                return web.json_response({"ok": False, "busy": True})
-            free_cached_models("node removed")
-            return web.json_response({"ok": True})
-
-        @routes.get(SEGMENT_ROUTE)
-        async def _segment_route(request):
-            import asyncio
-            params = dict(request.rel_url.query)
-            try:      # the file probing runs in a worker thread: never block the server
-                info = await asyncio.get_running_loop().run_in_executor(None, _segment_info, params)
-            except Exception as e:
-                log.debug("segment info failed: %s", e)
-                return web.json_response({"ok": False, "error": str(e)})
-            info["ok"] = True
-            return web.json_response(info)
-
-        @routes.post(RESET_ROUTE)
-        async def _reset_route(request):
-            if _RUNNING > 0:
-                return web.json_response({"ok": False, "busy": True})
-            _reset_state()
-            log.info("segment counter reset to 0")
-            return web.json_response({"ok": True, "index": 0})
-
-        @routes.post(JUMP_ROUTE)
-        async def _jump_route(request):
-            if _RUNNING > 0:
-                return web.json_response({"ok": False, "busy": True})
-            try:
-                body = await request.json()
-            except Exception:
-                body = {}
-            return web.json_response(_handle_jump(body))
-    except Exception as e:
-        log.debug("routes not registered: %s", e)
+    """v0.4.8: the routes live in routes.py; they read this module's names (counters, defaults, _RUNNING) when a request comes in."""
+    from . import routes
+    routes.register(sys.modules[__name__])
 
 
 def _is_interrupt(e):
@@ -380,544 +290,10 @@ def _stage(label, fn, *args):
         raise RuntimeError(f"[IronLeo78 MTV] stage '{label}' failed: {e}") from e
 
 
-# ---------------------------------------------------------------------- #
-# calling ComfyUI's own nodes (V1 and V3 style) by name
-# ---------------------------------------------------------------------- #
-_MISSING = object()
-
-
-def _spec_options(spec):
-    """Combo options of an INPUT_TYPES entry, or None when it is not a combo."""
-    if not isinstance(spec, (list, tuple)) or not spec:
-        return None
-    first = spec[0]
-    if isinstance(first, (list, tuple)):
-        return list(first)
-    if first == "COMBO" and len(spec) > 1 and isinstance(spec[1], dict):
-        return list(spec[1].get("options") or [])
-    return None
-
-
-def _spec_default(spec):
-    """The widget default of an INPUT_TYPES entry, _MISSING for link inputs."""
-    if not isinstance(spec, (list, tuple)) or not spec:
-        return _MISSING
-    opts = spec[1] if len(spec) > 1 and isinstance(spec[1], dict) else {}
-    combo = _spec_options(spec)
-    if combo is not None:
-        return opts.get("default", combo[0] if combo else _MISSING)
-    kind = spec[0]
-    if kind == "BOOLEAN":
-        return opts.get("default", False)
-    if kind == "STRING":
-        return opts.get("default", "")
-    if kind in ("INT", "FLOAT"):
-        return opts.get("default", opts.get("min", 0))
-    return _MISSING
-
-
-def _is_dynamic(spec):
-    """V3 'DynamicCombo' input: a combo whose chosen option brings its own sub-inputs."""
-    return (isinstance(spec, (list, tuple)) and bool(spec) and isinstance(spec[0], str)
-            and "DYNAMICCOMBO" in spec[0].upper())
-
-
-def _dyn_options(spec):
-    """{option key: {sub-input name: sub-input spec}} of a dynamic combo."""
-    raw = spec[1].get("options") if len(spec) > 1 and isinstance(spec[1], dict) else None
-    out = {}
-    for opt in raw or []:
-        if isinstance(opt, dict):
-            key, inputs = opt.get("key"), opt.get("inputs")
-        elif isinstance(opt, (list, tuple)) and len(opt) >= 2:
-            key, inputs = opt[0], opt[1]
-        else:
-            continue
-        subs = {}
-        if isinstance(inputs, dict):
-            for section in ("required", "optional"):
-                subs.update(inputs.get(section) or {})
-        out[key] = subs
-    return out
-
-
-def _nested_names(spec):
-    """Every sub-input name found inside a dynamic combo, at any depth."""
-    names = set()
-    for subs in _dyn_options(spec).values():
-        for sub, sub_spec in subs.items():
-            names.add(sub)
-            if _is_dynamic(sub_spec):
-                names |= _nested_names(sub_spec)
-    return names
-
-
-def _dyn_value(key, spec, provided, consumed, notes, node):
-    """
-    Build the dict a dynamic combo expects: {key: chosen option, sub-input: value, ...}.
-    Sub-inputs we know (by name, e.g. codec / encoding) are filled from `provided`;
-    the others get their own default.
-    """
-    options = _dyn_options(spec)
-    if not options:
-        return provided.get(key)
-    chosen = provided.get(key)
-    if chosen not in options:
-        if chosen is not None and notes is not None:
-            notes.append(f"{node}: '{key}' has no option '{chosen}' here, using its default")
-        opts = spec[1] if len(spec) > 1 and isinstance(spec[1], dict) else {}
-        chosen = opts.get("default", next(iter(options)))
-        if chosen not in options:
-            chosen = next(iter(options))
-    value = {key: chosen}
-    for sub, sub_spec in options[chosen].items():
-        if _is_dynamic(sub_spec):          # a dynamic combo inside a dynamic combo (format -> codec -> encoding)
-            value[sub] = _dyn_value(sub, sub_spec, provided, consumed, notes, node)
-            consumed.add(sub)
-            continue
-        combo = _spec_options(sub_spec)
-        if sub in provided and (not combo or provided[sub] in combo):
-            value[sub] = provided[sub]
-            consumed.add(sub)
-            continue
-        if sub in provided and notes is not None:
-            notes.append(f"{node}: '{sub}' has no option '{provided[sub]}' here, using its default")
-            consumed.add(sub)
-        default = _spec_default(sub_spec)
-        if default is not _MISSING:
-            value[sub] = default
-    return value
-
-
-def _describe_spec(spec):
-    if not _is_dynamic(spec):
-        return ""
-    parts = []
-    for opt, subs in _dyn_options(spec).items():
-        inner = ", ".join(k + ("=" + _describe_spec(v) if _is_dynamic(v) else "") for k, v in subs.items())
-        parts.append(f"{opt}({inner})" if inner else str(opt))
-    return "dynamic{" + " | ".join(parts) + "}"
-
-
-def _describe_schema(schema):
-    """Compact one-line description of a node's inputs (for the notes when something is off)."""
-    return ", ".join(key + ("=" + _describe_spec(spec) if _is_dynamic(spec) else "")
-                     for key, (_, spec) in schema.items())
-
-
-def _split_result(res):
-    """Any node result (tuple / dict / V3 NodeOutput) -> (outputs tuple, ui dict or None)."""
-    ui = None
-    if isinstance(res, dict):
-        ui = res.get("ui")
-        outs = res.get("result", ())
-    elif isinstance(res, tuple):
-        outs = res
-    elif hasattr(res, "args") or hasattr(res, "result"):
-        ui = getattr(res, "ui", None)
-        outs = getattr(res, "args", None) or getattr(res, "result", None) or ()
-    else:
-        outs = (res,)
-    if ui is not None and hasattr(ui, "as_dict"):
-        ui = ui.as_dict()
-    return tuple(outs), (ui if isinstance(ui, dict) else None)
-
-
-def _core(name, provided, strict=(), hidden=None, notes=None, hoist=False):
-    """
-    Run a core ComfyUI node by name.
-    - `provided` = the inputs we set; the node's own schema is read at run time, so
-      inputs we do not set get the node's OWN default (survives ComfyUI updates).
-    - `strict` = names that MUST exist in the schema (else a clear error).
-    - Dynamic combos (V3) are built as the dict the node expects, nested to any depth.
-      Inputs that the schema ALSO lists at top level but that live inside a dynamic combo
-      are normally not passed separately; hoist=True passes them as well.
-    - Names in `provided` that do not exist in this ComfyUI version are skipped and
-      reported in `notes`; a combo value the node does not offer falls back to its default.
-    Returns (outputs tuple, ui dict or None).
-    """
-    cls = comfy_nodes.NODE_CLASS_MAPPINGS.get(name)
-    if cls is None:
-        raise RuntimeError(f"core node '{name}' not found in this ComfyUI.")
-
-    try:
-        types = cls.INPUT_TYPES()
-        schema = {}
-        for section in ("required", "optional"):
-            for key, spec in (types.get(section) or {}).items():
-                schema[key] = (section, spec)
-    except Exception as e:
-        log.debug("No schema for %s (%s); passing inputs unchanged.", name, e)
-        schema = None
-
-    if schema is None:
-        kwargs = dict(provided)
-    else:
-        for key in strict:
-            if key not in schema:
-                raise RuntimeError(f"core node '{name}' has no input '{key}' (ComfyUI changed?).")
-        kwargs = {}
-        consumed = set()   # names that live inside a dynamic combo
-        nested = set()
-        for _, spec in schema.values():
-            if _is_dynamic(spec):
-                nested |= _nested_names(spec)
-        for key, (section, spec) in schema.items():
-            if _is_dynamic(spec) and (key in provided or section == "required"):
-                if key in nested and not hoist:
-                    continue
-                kwargs[key] = _dyn_value(key, spec, provided, set() if key in nested else consumed, notes, name)
-        for key, value in provided.items():
-            if key in consumed or key in nested or (key in schema and _is_dynamic(schema[key][1])):
-                continue
-            if key not in schema:
-                msg = (f"{name}: input '{key}' does not exist in this ComfyUI, skipped "
-                       f"(inputs here: {_describe_schema(schema)})")
-                log.warning(msg)
-                if notes is not None:
-                    notes.append(msg)
-                continue
-            options = _spec_options(schema[key][1])
-            if options and value not in options:
-                msg = f"{name}: '{key}' has no option '{value}' here, using its default"
-                log.warning(msg)
-                if notes is not None:
-                    notes.append(msg)
-                continue
-            kwargs[key] = value
-        for key, (section, spec) in schema.items():
-            if key in kwargs or section != "required":
-                continue
-            if key in nested and not hoist:
-                continue
-            default = _spec_default(spec)
-            if default is _MISSING:
-                raise RuntimeError(f"core node '{name}': required input '{key}' was not supplied.")
-            kwargs[key] = default
-
-    target = cls
-    if hidden is not None and hasattr(cls, "PREPARE_CLASS_CLONE"):  # V3 nodes reading cls.hidden
-        try:
-            target = cls.PREPARE_CLASS_CLONE(hidden)
-        except Exception as e:
-            log.warning("PREPARE_CLASS_CLONE failed for %s: %s", name, e)
-            target = cls
-
-    # Safety net: V3 nodes such as SaveVideo read cls.hidden.extra_pnginfo. If the clone did
-    # not provide it (hidden is None), set a plain holder on the class for the duration of the call.
-    patched = []
-    if hidden is not None:
-        import types as _types
-        holder = _types.SimpleNamespace(
-            unique_id=hidden.get("UNIQUE_ID"), prompt=hidden.get("PROMPT"),
-            extra_pnginfo=hidden.get("EXTRA_PNGINFO"), dynprompt=None,
-            auth_token_comfy_org=None, api_key_comfy_org=None)
-        for obj in {id(cls): cls, id(target): target}.values():
-            if getattr(obj, "hidden", None) is None:
-                try:
-                    old_hidden = getattr(obj, "hidden", None)
-                    obj.hidden = holder
-                    patched.append((obj, old_hidden))
-                except Exception as e:
-                    log.debug("Could not set hidden on %s: %s", name, e)
-    try:
-        if hasattr(target, "EXECUTE_NORMALIZED"):
-            res = target.EXECUTE_NORMALIZED(**kwargs)
-        elif hasattr(cls, "FUNCTION") and callable(getattr(cls, cls.FUNCTION, None)):
-            res = getattr(cls(), cls.FUNCTION)(**kwargs)
-        else:
-            res = cls.execute(**kwargs)
-    finally:
-        for obj, old_hidden in patched:
-            try:
-                obj.hidden = old_hidden
-            except Exception:
-                pass
-    return _split_result(res)
-
-
-@contextlib.contextmanager
-def _preview_scope(enabled):
-    """
-    Live Preview OFF: ComfyUI's latent previews are switched off while the sampler
-    runs (restored afterwards), so the node's last picture is the saved video.
-    Live Preview ON: ComfyUI's own --preview-method decides.
-    """
-    args = no_preview = old = None
-    if not enabled:
-        try:
-            from comfy.cli_args import args, LatentPreviewMethod
-            no_preview = LatentPreviewMethod.NoPreviews
-            old = args.preview_method
-            args.preview_method = no_preview
-        except Exception as e:
-            log.debug("Could not switch previews off: %s", e)
-            args = None
-    try:
-        yield
-    finally:
-        if args is not None and old is not None:
-            args.preview_method = old
-
-
-# ---------------------------------------------------------------------- #
-# segment counter state
-# ---------------------------------------------------------------------- #
-def _load_state():
-    if os.path.exists(STATE_FILE):
-        try:
-            with open(STATE_FILE) as f:
-                data = json.load(f)
-            return data if isinstance(data, dict) else {}
-        except Exception:
-            return {}
-    return {}
-
-
-def _write_state(state):
-    with open(STATE_FILE, "w") as f:
-        json.dump(state, f)
-
-
-def _load_index():
-    try:
-        return int(_load_state().get("index", 0))
-    except (TypeError, ValueError):
-        return 0
-
-
-def _to_int(value, default=0):
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def _save_index(index):
-    state = _load_state()      # keep the other keys (guide_frame_for)
-    state["index"] = index
-    state["furthest"] = max(_to_int(state.get("furthest")), int(index))     # v2.6: the "Latest" button
-    _write_state(state)
-
-
-def _load_furthest():
-    """v2.6: the highest counter value a Run (or a jump away from it) has left behind."""
-    return max(_to_int(_load_state().get("furthest")), _load_index())
-
-
-def _jump_to(segment):
-    """v2.6: the NEXT Run makes segment number `segment` (1 = the first, as the panel counts).
-    Returns (counter, furthest). The guide frames are kept (they are checked against the counter when used)."""
-    segment = int(segment)
-    if segment < 1:
-        raise ValueError("segment numbers start at 1")
-    state = _load_state()
-    state["furthest"] = max(_to_int(state.get("furthest")), _to_int(state.get("index")))
-    state["index"] = segment - 1
-    _write_state(state)
-    return state["index"], state["furthest"]
-
-
-def _handle_jump(body):
-    """The /jump route without the web layer: body = {"segment": N [, "total": T]} or {"latest": true}.
-    Returns the JSON answer."""
-    body = body if isinstance(body, dict) else {}
-    try:
-        if body.get("latest"):
-            target = _load_furthest() + 1
-        else:
-            target = int(body.get("segment"))
-            total = body.get("total")
-            if total not in (None, "") and target > int(total):
-                return {"ok": False, "error": f"there are only {int(total)} segments"}
-        if target < 1:
-            return {"ok": False, "error": "segment numbers start at 1"}
-    except (TypeError, ValueError):
-        return {"ok": False, "error": "the segment must be a whole number (1 or more)"}
-    index, furthest = _jump_to(target)
-    log.info("segment counter set: the next Run makes segment %d", index + 1)
-    return {"ok": True, "index": index, "segment": index + 1, "furthest": furthest}
-
-
-def _reset_state():
-    """v2.5: the Reset button. Segment counter back to 0 (and the saved guide frames forgotten)."""
-    _write_state({"index": 0})
-
-
-def _last_frame_of(images):
-    """The last frame of a decoded video as a small CPU tensor [1,H,W,3] (so the video itself can be freed)."""
-    return images[-1].detach().float().cpu().clamp(0, 1)[None].clone()
-
-
-def _save_last_frame(frame, segment):
-    """Keep the last frame of this run (it was segment number `segment`) for the Guide of the next run."""
-    arr = frame[0].numpy()
-    Image.fromarray((arr * 255.0 + 0.5).astype(np.uint8)).save(LAST_FRAME_FILE)
-    state = _load_state()
-    state["guide_frame_for"] = int(segment)
-    _write_state(state)
-
-
-def _clip_from_manifest(song, segment):
-    """v2.6: the clip saved for `segment` (0-based, as in the file names), found through the
-    manifest (rows of other scene tags, from older versions, are ignored). The LATEST row that still has a
-    file on disk wins (a redo adds a row). Manifests of 0.5 and older may also list an upscaled clip: it is preferred.
-    None when there is none."""
-    path = _manifest_path(song)
-    if not os.path.exists(path):
-        return None
-    out_dir = folder_paths.get_output_directory()
-    found = None
-    with open(path, newline="", encoding="utf-8-sig") as f:
-        for row in csv.DictReader(f):
-            if _to_int(row.get("segment"), -1) != int(segment) or (row.get("scene") or SCENE_TAG) != SCENE_TAG:
-                continue
-            for key in ("upscaled_file", "file"):
-                rel = (row.get(key) or "").strip()
-                full = os.path.join(out_dir, *rel.split("/")) if rel else ""
-                if full and os.path.exists(full):
-                    found = full
-                    break
-    return found
-
-
-def _clip_last_frame_array(path):
-    """v2.6: the last video frame of a saved clip as an RGB uint8 array [H, W, 3] (PyAV), None when empty."""
-    container = _open_media(path)
-    try:
-        last = None
-        for frame in container.decode(video=0):
-            last = frame
-        return None if last is None else last.to_ndarray(format="rgb24")
-    finally:
-        container.close()
-
-
-def _load_last_frame(index, song=None):
-    """(image [1,H,W,3] or None, reason). Only valid when it comes from the segment right before `index`.
-    v2.6: when the saved frame is from another segment (after a jump / a redo), and `song` is given, the frame
-    is read back from the clip that segment saved (found through the manifest). reason then names the clip."""
-    if index <= 0:
-        return None, "first segment, nothing to continue from"
-    if _load_state().get("guide_frame_for") == index - 1 and os.path.exists(LAST_FRAME_FILE):
-        img = Image.open(LAST_FRAME_FILE).convert("RGB")
-        arr = np.array(img).astype(np.float32) / 255.0
-        return torch.from_numpy(arr)[None,], ""
-    if song is not None:
-        try:
-            clip = _clip_from_manifest(song, index - 1)
-            arr = _clip_last_frame_array(clip) if clip else None
-            if arr is not None:
-                return (torch.from_numpy(arr.astype(np.float32) / 255.0)[None,],
-                        f"read back from the saved clip {os.path.basename(clip)}")
-        except Exception as e:
-            log.warning("Could not read the last frame back from segment %d: %s", index - 1, e)
-    return None, f"no saved last frame from segment {index - 1}"
-
-
-# ---------------------------------------------------------------------- #
-# v2.1: file names / manifest for musical sections
-# ---------------------------------------------------------------------- #
-def _safe_name(text, max_len=60):
-    """Letters (accents kept), digits, '_' and '-' only; everything else becomes '_'."""
-    out = re.sub(r"[^\w\-]+", "_", str(text or "").strip())
-    return out.strip("_-")[:max_len].strip("_-")
-
-
-def _song_name(kw):
-    """v2.4: the song name is the Custom Audio File name (no extension), or '' when none is selected."""
-    f = kw.get("Custom Audio File", NONE_CHOICE)
-    if not f or f == NONE_CHOICE:
-        return ""
-    base = os.path.basename(str(f).replace("\\", "/").split(" [")[0])   # 'sub/song.wav [input]' -> 'song.wav'
-    return _safe_name(os.path.splitext(base)[0])
-
-
-def _clip_prefix(kw, media):
-    """(SaveVideo filename_prefix, tag) for the clip of this Run.
-    <Song>/<Song>_seg004_A   (ComfyUI adds its own _00001_ counter after it).
-    No custom audio: <video or Picture1 name>_seg004_A in the output folder (or video/ComfyUI_seg004_A)."""
-    song = _song_name(kw)
-    stem = _safe_name(media.get("filename", ""))
-    base = song or stem or "ComfyUI"
-    folder = song if song else ("" if stem else "video")
-    tag = f"{base}_seg{int(media.get('index', 0)):03d}_{SCENE_TAG}"
-    return (f"{folder}/{tag}" if folder else tag), tag
-
-
-def _manifest_fields(path):
-    """Header of an existing manifest. A manifest from an older version gets the new columns
-    (v2.5: prompt_json) added in place. None = the file is empty (a header must be written)."""
-    with open(path, newline="", encoding="utf-8-sig") as f:
-        reader = csv.DictReader(f)
-        header = list(reader.fieldnames or [])
-        rows = list(reader) if header else []
-    if not header:
-        return None
-    missing = [c for c in MANIFEST_FIELDS if c not in header]
-    if not missing:
-        return header
-    fields = header + missing
-    tmp = path + ".tmp"
-    with open(tmp, "w", newline="", encoding="utf-8-sig") as f:
-        writer = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore", restval="")
-        writer.writeheader()
-        writer.writerows(rows)
-    os.replace(tmp, path)
-    return fields
-
-
-def _manifest_path(song):
-    out_dir = folder_paths.get_output_directory()
-    song_s = _safe_name(song)
-    folder = os.path.join(out_dir, song_s) if song_s else out_dir
-    return os.path.join(folder, f"{song_s}_manifest.csv" if song_s else MANIFEST_NO_SONG)
-
-
-def _append_manifest(song, rows):
-    """Append one CSV row per saved clip. Returns the manifest path relative to the output folder."""
-    out_dir = folder_paths.get_output_directory()
-    path = _manifest_path(song)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    fields = _manifest_fields(path) if os.path.exists(path) else None
-    is_new = fields is None
-    if is_new:
-        fields = list(MANIFEST_FIELDS)
-    with open(path, "a", newline="", encoding="utf-8-sig" if is_new else "utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore", restval="")
-        if is_new:
-            writer.writeheader()
-        for row in rows:
-            writer.writerow(row)
-    return os.path.relpath(path, out_dir).replace(os.sep, "/")
-
-
-def _write_sidecar(saved, data):
-    """v2.5: <clip>.json next to a saved clip. `saved` = 'subfolder/file.mp4' as SaveVideo reported it.
-    Returns the sidecar path relative to the output folder ('' when there is nothing to attach it to)."""
-    if not saved or saved == "?":
-        return ""
-    out_dir = folder_paths.get_output_directory()
-    path = os.path.splitext(os.path.join(out_dir, *saved.split("/")))[0] + ".json"
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2, default=str)
-    return os.path.relpath(path, out_dir).replace(os.sep, "/")
-
 
 # ---------------------------------------------------------------------- #
 # file listings
 # ---------------------------------------------------------------------- #
-def _image_files():
-    input_dir = folder_paths.get_input_directory()
-    files = [f for f in os.listdir(input_dir) if os.path.isfile(os.path.join(input_dir, f))]
-    try:
-        files = folder_paths.filter_files_content_types(files, ["image"])
-    except Exception:
-        pass
-    return sorted(files)
-
-
 def _video_files():
     d = folder_paths.get_input_directory()
     try:
@@ -971,8 +347,8 @@ def _decode_custom_audio(name):
     if cls is not None:
         try:
             return cls().load(name)[0]
-        except Exception:
-            pass
+        except Exception as e:      # v0.0.9r: the pack's own decoder takes over
+            log.debug("LoadAudio failed for '%s' (%s): using the pack's own decoder", name, e)
     audio = _decode_audio(path)
     if audio is None:
         raise RuntimeError(f"No audio stream found in custom audio file: {name}")
@@ -1015,8 +391,8 @@ def _clip_counter(st):
                 m = pattern.match(name)
                 if m:
                     best = max(best, int(m.group(1)))
-        except OSError:
-            pass
+        except OSError as e:      # v0.0.9r: the number then starts at 1
+            log.debug("could not list '%s' to number the clip (%s)", folder, e)
         return best + 1
 
 
@@ -1043,9 +419,10 @@ def _shape_of(latent):
 # song stems (Audio Stem): Hybrid Demucs once per song, then read from disk
 # ---------------------------------------------------------------------- #
 def _stem_choice(kw):
-    """The Audio Stem of this Run. A missing / unknown value (a workflow saved before the widget existed) = Song."""
-    value = kw.get("Audio Stem", _stems.STEM_SONG)
-    return value if value in _stems.STEM_CHOICES else _stems.STEM_SONG
+    """The Audio Stem of this Run. A missing / unknown value (a workflow saved before the widget existed) = Full.
+    v0.0.6: the old name "Song" (workflows and API prompts saved before) means Full."""
+    value = kw.get("Audio Stem", _stems.STEM_FULL)
+    return value if value in _stems.STEM_CHOICES else _stems.STEM_FULL
 
 
 def _stem_song_name(name):
@@ -1070,11 +447,11 @@ def _ensure_song_stems(name, progress=None):
 
 
 def _load_audio_for_stem(name, stem):
-    """Song = the Custom Audio File itself. Any other stem = that stem's WAV (made on first use, then cached on disk).
+    """Full = the Custom Audio File itself. Any other stem = that stem's WAV (made on first use, then cached on disk).
     The decoded stem is kept in RAM like the song (one entry); never mutate the result."""
     if not name or name == NONE_CHOICE:
         return None
-    if stem == _stems.STEM_SONG:
+    if stem == _stems.STEM_FULL:
         return _load_custom_audio(name)
     paths, _ = _ensure_song_stems(name)
     path = paths[stem]
@@ -1090,251 +467,6 @@ def _load_audio_for_stem(name, stem):
     if audio["waveform"].numel() * audio["waveform"].element_size() <= AUDIO_CACHE_MAX_BYTES:
         _AUDIO_CACHE[key] = audio
     return audio
-
-
-# ---------------------------------------------------------------------- #
-# video helpers
-# ---------------------------------------------------------------------- #
-def _resolve_video_path(video):
-    if not video or video == NONE_CHOICE:
-        raise ValueError("Use Video is ON but no video is selected. Upload one, or switch Use Video OFF.")
-    return folder_paths.get_annotated_filepath(video)
-
-
-def _minimax_frames(seconds):
-    # MiniMax H3 frame count: 24 fps, minimum 5, padded up so frames % 17 == 5
-    base = max(5, round(seconds * 24))
-    return base + (5 - (base % 17)) % 17
-
-
-def _require_av():
-    try:
-        import av
-        return av
-    except ImportError as e:
-        raise RuntimeError(
-            "PyAV ('av') is required to decode video/audio. It is normally installed with ComfyUI; "
-            "otherwise run:  pip install av"
-        ) from e
-
-
-def _open_media(path):
-    av = _require_av()
-    try:
-        return av.open(path)
-    except Exception as e:
-        raise RuntimeError(f"Could not open '{os.path.basename(path)}': {e}") from e
-
-
-def _container_t0(container):
-    st = container.start_time  # microseconds, or None
-    return (st / 1_000_000.0) if st else 0.0
-
-
-def _seek(container, stream, t_abs):
-    """Seek back to the keyframe at/before t_abs (seconds). Silently stays at the start on failure."""
-    try:
-        container.seek(max(0, int(t_abs / float(stream.time_base))),
-                       stream=stream, backward=True, any_frame=False)
-    except Exception:
-        pass
-
-
-def _decode_video(path, force_rate, skip, cap):
-    """
-    Decode `cap` frames starting at output-frame `skip`.
-    force_rate > 0 resamples to that fps (frames dropped/duplicated by timestamp),
-    force_rate == 0 keeps the native rate.
-    Returns (uint8 array [N,H,W,3] or None if past the end, info dict).
-    """
-    container = _open_media(path)
-    try:
-        if not container.streams.video:
-            raise RuntimeError(f"'{os.path.basename(path)}' has no video stream.")
-        stream = container.streams.video[0]
-        try:
-            stream.thread_type = "AUTO"
-        except Exception:
-            pass
-
-        tb = float(stream.time_base)
-        t0 = _container_t0(container)
-        src_fps = float(stream.average_rate or stream.guessed_rate or 24)
-        rate = float(force_rate) if force_rate and force_rate > 0 else src_fps
-
-        if container.duration:
-            duration = container.duration / 1_000_000.0
-        elif stream.duration:
-            duration = float(stream.duration * tb)
-        else:
-            duration = 0.0
-
-        try:
-            rotate = int(float(stream.metadata.get("rotate", 0))) % 360
-        except Exception:
-            rotate = 0
-
-        def to_arr(frame):
-            arr = frame.to_ndarray(format="rgb24")
-            if rotate:
-                arr = np.ascontiguousarray(np.rot90(arr, k=(rotate // 90) % 4 * -1))
-            return arr
-
-        end = skip + cap
-        k = skip
-        out = []
-        prev = None
-        prev_arr = None
-        last_t = None
-        EPS = 1e-6
-
-        if skip > 0:
-            _seek(container, stream, t0 + skip / rate)
-
-        for frame in container.decode(stream):
-            if frame.pts is not None:
-                t = float(frame.pts * tb) - t0
-            else:
-                t = (last_t + 1.0 / src_fps) if last_t is not None else 0.0
-            last_t = t
-
-            if prev is None:
-                prev = frame
-                continue
-
-            # prev stays "current" until this frame's timestamp
-            while k < end and k / rate < t - EPS:
-                if prev_arr is None:
-                    prev_arr = to_arr(prev)
-                out.append(prev_arr)
-                k += 1
-            prev, prev_arr = frame, None
-            if k >= end:
-                break
-
-        # end of stream: the last frame lasts one source frame
-        if prev is not None and k < end:
-            end_t = (last_t if last_t is not None else 0.0) + 1.0 / src_fps
-            while k < end and k / rate < end_t - EPS:
-                if prev_arr is None:
-                    prev_arr = to_arr(prev)
-                out.append(prev_arr)
-                k += 1
-
-        info = {"rate": rate, "src_fps": src_fps, "duration": duration}
-        return (np.stack(out) if out else None), info
-    finally:
-        container.close()
-
-
-def _decode_audio(path, start=0.0, dur=None):
-    """
-    Decode audio from `start` seconds for `dur` seconds (dur=None -> to the end).
-    Returns an AUDIO dict, or None when the file has no audio stream / nothing in that range.
-    """
-    av = _require_av()
-    container = _open_media(path)
-    try:
-        if not container.streams.audio:
-            return None
-        stream = container.streams.audio[0]
-        tb = float(stream.time_base)
-        t0 = _container_t0(container)
-        stop_t = None if dur is None else start + dur
-
-        if start > 0:
-            _seek(container, stream, t0 + max(0.0, start - 0.5))
-
-        resampler = None
-        sr = None
-        chunks = []
-        chunk_start = None
-        n_samples = 0
-
-        def take(frames):
-            nonlocal n_samples
-            if frames is None:
-                return
-            if not isinstance(frames, (list, tuple)):
-                frames = [frames]
-            for f in frames:
-                arr = f.to_ndarray()  # fltp -> [channels, samples]
-                chunks.append(arr)
-                n_samples += arr.shape[1]
-
-        done = False
-        for frame in container.decode(stream):
-            if resampler is None:
-                sr = int(frame.sample_rate)
-                resampler = av.AudioResampler(format="fltp", layout=frame.layout.name, rate=sr)
-                chunk_start = (float(frame.pts * tb) - t0) if frame.pts is not None else start
-            take(resampler.resample(frame))
-            if stop_t is not None and chunk_start + n_samples / sr >= stop_t:
-                done = True
-                break
-        if resampler is not None and not done:
-            try:
-                take(resampler.resample(None))
-            except Exception:
-                pass
-
-        if not chunks:
-            return None
-        wave = np.concatenate(chunks, axis=1).astype(np.float32, copy=False)
-
-        offset = int(round((start - chunk_start) * sr))
-        if offset > 0:
-            wave = wave[:, offset:]
-        elif offset < 0:
-            wave = np.pad(wave, ((0, 0), (-offset, 0)))
-        if dur is not None:
-            wave = wave[:, :int(round(dur * sr))]
-        if wave.shape[1] == 0:
-            return None
-        return {"waveform": torch.from_numpy(np.ascontiguousarray(wave))[None], "sample_rate": sr}
-    finally:
-        container.close()
-
-
-# ---------------------------------------------------------------------- #
-# image helpers
-# ---------------------------------------------------------------------- #
-def _target_size(src_w, src_h, megapixels, multiple):
-    """Width/height at ~megapixels, keeping the src aspect ratio."""
-    multiple = max(1, int(multiple))
-    aspect = src_w / src_h
-    pixels = megapixels * 1_000_000.0
-    h = math.sqrt(pixels / aspect)
-    w = h * aspect
-    w = max(multiple, int(round(w / multiple)) * multiple)
-    h = max(multiple, int(round(h / multiple)) * multiple)
-    return w, h
-
-
-def _resize(img, w, h, method):
-    """img: [1,H,W,3] float tensor -> [1,h,w,3]."""
-    if img.shape[2] == w and img.shape[1] == h:
-        return img
-    if method == "lanczos":
-        pil = Image.fromarray((img[0].clamp(0, 1).cpu().numpy() * 255.0 + 0.5).astype(np.uint8))
-        pil = pil.resize((w, h), Image.LANCZOS)
-        arr = np.array(pil).astype(np.float32) / 255.0
-        return torch.from_numpy(arr)[None,]
-    x = img.movedim(-1, 1)
-    x = F.interpolate(x, size=(h, w), mode=method, align_corners=False, antialias=True)
-    return x.clamp(0, 1).movedim(1, -1).contiguous()
-
-
-def _fit_frame(img, w, h):
-    """Center-crop img [1,H,W,3] to the aspect of w x h (nothing stretched), then resize to w x h."""
-    ih, iw = int(img.shape[1]), int(img.shape[2])
-    if iw / ih > w / h:
-        ch, cw = ih, int(round(ih * w / h))
-    else:
-        cw, ch = iw, int(round(iw * h / w))
-    cw, ch = max(1, min(cw, iw)), max(1, min(ch, ih))
-    sx, sy = (iw - cw) // 2, (ih - ch) // 2
-    return _resize(img[:, sy:sy + ch, sx:sx + cw, :], w, h, RESIZE_METHOD)
 
 
 # ---------------------------------------------------------------------- #
@@ -1388,12 +520,32 @@ def _probe_seconds(name, kind):
     return seconds or None
 
 
-def _truthy(value, default=False):
-    if value is None:
-        return default
+AUDIO_MINIMAX = "MiniMax Audio"       # v0.0.3, reworked in v0.0.4: no bypass, the model's own latent goes to the sampler (official ref2v template)
+AUDIO_VIDEO = "Audio From Video"      # bypass: the video soundtrack, encoded and frozen
+AUDIO_CUSTOM = "Custom Audio"         # bypass: your song, chunked per segment, encoded and frozen
+AUDIO_MODES = (AUDIO_MINIMAX, AUDIO_VIDEO, AUDIO_CUSTOM)
+DEFAULT_AUDIO_MODE = AUDIO_CUSTOM
+
+
+def _audio_mode(value):
+    """The 'Choose Audio latent' widget as one of AUDIO_MODES. Workflows saved before v0.0.3 stored a bool there
+    (False = Audio From Video, True = Custom Audio); the segment-panel route sends strings."""
     if isinstance(value, str):
-        return value.strip().lower() in ("1", "true", "yes", "on")
-    return bool(value)
+        v = value.strip().lower()
+        for mode in AUDIO_MODES:
+            if v == mode.lower():
+                return mode
+        return AUDIO_CUSTOM if v in ("1", "true", "yes", "on") else AUDIO_VIDEO
+    return AUDIO_CUSTOM if value else AUDIO_VIDEO
+
+
+def _segment_txt(kw, index):
+    """v0.0.9w: 'segment N | next: segment N+1' for the status lines, counted from 1 like the panel and the header
+    (index is 0-based). Next Segment On Run OFF: every Run makes segment 1, so no 'next'."""
+    text = f"segment {int(index) + 1}"
+    if _truthy(kw.get("Next Segment On Run")):
+        text += f" | next: segment {int(index) + 2}"
+    return text
 
 
 def _num(value, default, cast=float):
@@ -1407,12 +559,13 @@ def _segment_plan(p):
     """How many segments the selection holds. `p` = the node's widget values (strings are fine).
     Mirrors what _load_media steps through:
       Use Video ON                                    -> the video frames
-      Bypassed Audio Latent = Custom Audio + a file    -> the custom audio chunks
+      Choose Audio latent = Custom Audio + a file    -> the custom audio chunks
       Use Video OFF + Bypass Minimax + Audio From Video + a video -> the video soundtrack
     When several apply, the shortest one ends the run. total = None when nothing steps through a file."""
     use_video = _truthy(p.get("Use Video"), True)
-    chunk_custom = _truthy(p.get("Bypassed Audio Latent"))
-    bypass = True   # v2.8.4: Bypass Minimax is hardcoded
+    mode = _audio_mode(p.get("Choose Audio latent"))
+    chunk_custom = mode == AUDIO_CUSTOM
+    bypass = mode != AUDIO_MINIMAX   # MiniMax Audio = no bypass: nothing is read from a video soundtrack
     frames = _minimax_frames(_num(p.get("duration"), 5.0))
     seg_seconds = frames / DEFAULT_FPS
 
@@ -1443,111 +596,117 @@ def _segment_plan(p):
             "sources": sources, "frames": int(frames), "seg_seconds": round(seg_seconds, 4)}
 
 
+def _run_index(kw):
+    """v0.2.3: the 0-based segment this Run makes. Next Segment On Run ON: the song's counter (it moves on after the Run). OFF: the
+    SAME counter, so the segment chosen with Go is repeated on every Run and the counter does not move; a counter that is already
+    at the end of the file (a finished session) gives segment 1, as an OFF Run always did before 0.2.3."""
+    idx = _load_index(kw.get("counter_key", ""))
+    if kw.get("Next Segment On Run"):
+        return idx
+    try:
+        total = _segment_plan(kw)["total"]
+    except Exception as e:
+        log.debug("segment plan failed: %s", e)
+        total = None
+    return 0 if (total is not None and idx >= total) else idx
+
+
 def _segment_info(params):
     """What the node's segment panel shows: the plan + the stored counter."""
     info = _segment_plan(params)
-    index = _load_index()
+    key = _counter_key(params)      # v0.1.8: the counter of the song / video selected on the node
+    index = _load_index(key)
     total = info["total"]
-    info.update(index=index, furthest=max(_to_int(_load_state().get("furthest")), index),
+    info.update(index=index, furthest=max(_load_furthest(key), index), counter=_counter_label(key),
                 stepping=_truthy(params.get("Next Segment On Run")),
                 running=_RUNNING > 0, finished=bool(total is not None and index >= total))
     return info
 
 
-# ---------------------------------------------------------------------- #
-# the node
-# ---------------------------------------------------------------------- #
-# ---------------------------------------------------------------------- #
-# v2.3: Model Loader overrides + run-time model check
-# ---------------------------------------------------------------------- #
-def apply_model_overrides(kw, models):
-    """Apply the dict of the optional "models" input to kw. Returns (from_manager, 'what changed' text).
-    Only whitelisted keys count; an empty / "None" file name keeps the hardcoded default."""
-    if models is None:
-        return False, ""
-    if not isinstance(models, dict):
-        raise RuntimeError("[IronLeo78 MTV] the 'models' input must come from the "
-                           "IronLeo78 MTV Model Loader node.")
-    changed = []
-    for key in MODEL_FILE_KEYS:
-        value = models.get(key)
-        if isinstance(value, str) and value.strip() and value != NONE_CHOICE:
-            if value != kw.get(key):
-                changed.append(f"{key.replace('_name', '')}={value}")
-            kw[key] = value
-    for key in MODEL_STEP_KEYS:
-        if models.get(key) is None:
+def _custom_audio_chunk(kw, custom_full, custom_id, chunk_custom, audio_mode, index, seg_seconds, frames, out_fps):
+    """v0.4.5 (split out of _load_media): the Custom Audio of this Run -> (audio, status note, cache id). Chunk mode: segment `index` cut
+    from the song and padded with silence to the clip length (past the end: the quiet stop, or an error for segment 1); the whole file
+    in the other bypass mode; nothing without a file."""
+    if custom_full is None:
+        return None, "", None
+    if not chunk_custom:
+        return custom_full, f"custom audio: whole file (Choose Audio latent = {audio_mode})", ("a2w", custom_id)
+    c_start = index * seg_seconds
+    custom_audio = _slice_audio(custom_full, c_start, seg_seconds)
+    if custom_audio is None:
+        total_s = custom_full["waveform"].shape[-1] / float(custom_full["sample_rate"])
+        msg = (f"End of custom audio: segment {index + 1} would start at {c_start:.2f}s, "
+               f"past its end ({total_s:.2f}s).")
+        if index > 0:      # v2.5: quiet stop
+            raise _EndOfSegments(msg, index)
+        raise RuntimeError(msg)
+    sr = float(custom_audio["sample_rate"])
+    got = custom_audio["waveform"].shape[-1] / sr
+    cond_audio2 = ("a2c", custom_id, round(float(c_start), 4), round(float(seg_seconds), 6))
+    audio_note = (f"custom audio chunk: {_segment_txt(kw, index)} | {c_start:.2f}s to {c_start + got:.2f}s"
+                  f" | length {seg_seconds:.3f}s = {frames} frames @ {out_fps:g} fps")
+    missing = int(round(seg_seconds * sr)) - custom_audio["waveform"].shape[-1]
+    if missing > 0:
+        # last chunk: pad with silence so it is as long as the video (audio latent stays aligned)
+        padded = F.pad(custom_audio["waveform"], (0, missing))
+        custom_audio = {**custom_audio, "waveform": padded}
+        audio_note += f" | end of audio: padded with {missing / sr:.2f}s of silence"
+    return custom_audio, audio_note, cond_audio2
+
+
+def _reference_pictures(kw, slots, mp):
+    """v0.4.5 (split out of _load_media): the wired Picture_1 .. Picture_<slots> at native size (an empty input = an empty slot, nothing
+    sent) -> (raw pictures, {slot: True} for the wired ones, each picture's megapixel target keeping its OWN aspect ratio)."""
+    raw = []
+    linked = {}         # slot -> True when an IMAGE is wired into Picture_<slot>
+    for i in range(1, slots + 1):
+        wired = kw.get(_picture_input(i))
+        if wired is None:
+            raw.append(None)
             continue
         try:
-            n = int(models[key])
-        except (TypeError, ValueError):
-            raise RuntimeError(f"[IronLeo78 MTV] Model Loader: {key} must be a whole number.")
-        if not MIN_STEPS <= n <= MAX_STEPS:
-            raise RuntimeError(f"[IronLeo78 MTV] Model Loader: {key} must be between "
-                               f"{MIN_STEPS} and {MAX_STEPS}.")
-        if n != kw.get(key):
-            changed.append(f"{key}={n}")
-        kw[key] = n
-    if models.get("custom_lora_enabled") is not None:      # v2.8.6: custom LoRA toggle / file / strength
-        enabled = _truthy(models["custom_lora_enabled"])
-        if enabled != kw.get("custom_lora_enabled"):
-            changed.append(f"custom_lora={'ON' if enabled else 'OFF'}")
-        kw["custom_lora_enabled"] = enabled
-    lora = models.get("custom_lora_name")
-    if isinstance(lora, str) and lora.strip() and lora != NONE_CHOICE:
-        if lora != kw.get("custom_lora_name"):
-            changed.append(f"custom_lora_name={lora}")
-        kw["custom_lora_name"] = lora
-    if models.get("custom_lora_strength") is not None:
-        try:
-            strength = float(models["custom_lora_strength"])
-        except (TypeError, ValueError):
-            raise RuntimeError("[IronLeo78 MTV] Model Loader: custom_lora_strength must be a number.")
-        if not -100.0 <= strength <= 100.0:
-            raise RuntimeError("[IronLeo78 MTV] Model Loader: custom_lora_strength must be between -100 and 100.")
-        if strength != kw.get("custom_lora_strength"):
-            changed.append(f"custom_lora_strength={strength:g}")
-        kw["custom_lora_strength"] = strength
-    if models.get("noise_seed") is not None:      # v2.8.5: the seed lives on the Model Loader
-        try:
-            seed = int(models["noise_seed"])
-        except (TypeError, ValueError):
-            raise RuntimeError("[IronLeo78 MTV] Model Loader: noise_seed must be a whole number.")
-        if not 0 <= seed <= MAX_SEED:
-            raise RuntimeError("[IronLeo78 MTV] Model Loader: noise_seed is out of range.")
-        if seed != kw.get("noise_seed"):
-            changed.append(f"noise_seed={seed}")
-        kw["noise_seed"] = seed
-    return True, ", ".join(changed) if changed else "nothing changed from the defaults"
+            raw.append(_linked_image(wired))
+        except Exception as e:
+            log.error("[%s] failed to read the linked image: %s", _picture_input(i), e)
+            raise RuntimeError(
+                f"[IronLeo78 MTV] {_picture_input(i)} (linked image) failed: {e}"
+            ) from e
+        linked[i] = True
+    sizes = [None if img is None else _target_size(img.shape[2], img.shape[1], mp, DIVISIBLE_BY)
+             for img in raw]
+    return raw, linked, sizes
 
 
-def _check_models(kw):
-    """Friendly error (before any model is loaded or a segment is used) for a missing model file."""
-    source = "Model Loader" if kw.get("models_source") else "hardcoded"
-    wanted = [("unet_name", folder_paths.get_filename_list("diffusion_models")),
-              ("qwen_vl_name", folder_paths.get_filename_list("text_encoders")),
-              ("video_vae_name", _vae_options()),
-              ("audio_vae_name", _vae_options())]
-    if kw.get("Turbo"):
-        wanted.append(("turbo_lora_name", folder_paths.get_filename_list("loras")))
-    if kw.get("custom_lora_enabled"):      # v2.8.6: only checked when the custom LoRA is switched ON
-        name = kw.get("custom_lora_name")
-        if not name or name == NONE_LORA or name not in folder_paths.get_filename_list("loras"):
-            raise RuntimeError(f"[IronLeo78 MTV] Custom LoRA ({source}) not found: put "
-                               f"{name if name and name != NONE_LORA else DEFAULT_CUSTOM_LORA} in ComfyUI/models/loras/ "
-                               f"(or switch the custom LoRA OFF on the Model Loader)")
-    for key, options in wanted:
-        label, folder = MODEL_FILE_KEYS[key]
-        name = kw[key]
-        if name not in options:
-            where = f"ComfyUI/models/{folder}/"
-            extra = " (or switch Turbo OFF)" if key == "turbo_lora_name" else ""
-            raise RuntimeError(f"[IronLeo78 MTV] {label} ({source}) not found: "
-                               f"put {name} in {where}{extra}")
+def _resized_pictures(raw, sizes):
+    """v0.4.5 (split out of _load_media): the pictures resized to their targets (empty slots stay None) and their cache ids. v0.0.9m: the
+    fingerprint is taken of the RESIZED picture (what the conditioning really consumes, ~23 ms for 12 MP, not ~290 ms at full size)."""
+    pictures = [None if img is None else _resize(img, size[0], size[1], RESIZE_METHOD)
+                for img, size in zip(raw, sizes)]
+    pic_ids = [None if img is None else ("pi", _image_fingerprint(img), size)
+               for img, size in zip(pictures, sizes)]
+    return pictures, pic_ids
+
+
+def _media_status_lines(audio_note, chunk_custom, custom_full, linked, kw):
+    """v0.4.5 (split out of _load_media): the lines appended to the status text: the audio note, the missing-song warning, the pictures."""
+    out = ""
+    if audio_note:
+        out += "\n" + audio_note
+    if chunk_custom and custom_full is None:      # v0.3.10: it used to skip the song without a word
+        warn_song = ("WARNING: Choose Audio latent = Custom Audio but no Custom Audio File is selected: NO song is used "
+                     "(pick a file, or choose another Choose Audio latent)")
+        log.warning("[IronLeo78 MTV] %s", warn_song)
+        out += "\n" + warn_song
+    if linked:
+        out += "\n" + f"reference pictures: {', '.join(_picture_input(i) for i in sorted(linked))}"
+    if kw.get("none_pictures"):      # v0.0.9v (set by run())
+        out += "\n" + ("empty slots skipped (NONE picture from the Prompt Generator): "
+                       + ", ".join(_picture_input(i) for i in kw["none_pictures"]))
+    return out
 
 
 class IronLeo78_MTV:
-    SLOTS = 3
+    SLOTS = 9               # Picture_1 .. Picture_9 (the core MiniMax H3 node takes at most 9 reference pictures), all always on
 
     def __init__(self):
         pass
@@ -1555,31 +714,49 @@ class IronLeo78_MTV:
     # ------------------------------------------------------------------ #
     @classmethod
     def INPUT_TYPES(cls):
-        img_files = _image_files()
         vid_files = _video_files()
 
         r = {
             # ===== turbo (the Turbo LoRA itself is hardcoded) =====
             "Turbo": ("BOOLEAN", {
                 "default": True, "label_on": "ON", "label_off": "OFF",
-                "tooltip": "ON: Turbo LoRA applied, 4 steps. OFF: no Turbo LoRA, 25 steps "
+                "tooltip": "ON: Turbo LoRA applied, 6 steps. OFF: no Turbo LoRA, 30 steps (both and the Turbo LoRA strength can be changed on the Model Loader) "
                            "(BasicGuider, no CFG, like the official r2v template).",
             }),
             # ===== video / audio =====
             "Use Video": ("BOOLEAN", {
                 "default": False, "label_on": "ON", "label_off": "OFF",
                 "tooltip": "ON = v2v: the video is loaded and is the reference for megapixels/width/height. "
-                           "OFF = i2v: no frames are loaded, Picture1 is the reference. "
-                           "Exception: with Bypassed Audio Latent = "
+                           "OFF = i2v: no frames are loaded, the Picture_1 input is the reference. "
+                           "Exception: with Choose Audio latent = "
                            "Audio From Video, a selected Video File still supplies its soundtrack "
                            "(audio only). Set Video File to None for silence.",
             }),
             "Video File": ([NONE_CHOICE] + vid_files,
                            {"default": NONE_CHOICE, "video_upload": True}),
+            # ===== audio latent. v0.1.11: MOVED here, right under Video File (was after prompt, position 9 -> 3). Saved workflows
+            # are put back in order by name (named copy) or, without one, by moveAudioLatentUp in web/ironleo78_mtv.js =====
+            "Choose Audio latent": (list(AUDIO_MODES), {
+                "default": DEFAULT_AUDIO_MODE,
+                "tooltip": "Where the sound of the clip comes from. "
+                           "MiniMax Audio = like the official MiniMax H3 ref2v template: no bypass, the model's own audio "
+                           "latent goes to the sampler and the model generates the sound itself (voice, effects, music). "
+                           "A Custom Audio File / video soundtrack, if any, is then only sent as a reference "
+                           "(use <Audio 1> in the prompt). "
+                           "Audio From Video = the video soundtrack is encoded into the audio latent and frozen "
+                           "(silence if none). "
+                           "Custom Audio = the Custom Audio File is encoded into the audio latent and frozen "
+                           "(silence if none): the model never invents sound, the picture follows your music. "
+                           "Custom Audio also decides which audio Next Segment On Run moves through: "
+                           "the song is cut into chunks as long as the real video "
+                           "segment (frames / fps: duration 5 s = 124 frames = 5.17 s), one chunk per Run "
+                           "(works with Use Video OFF too); the segment counter at the top of the node "
+                           "decides which chunk is next (Jump).",
+            }),
             "Custom Audio File": (_audio_files(), {"audio_upload": True}),
             "Audio Stem": (list(_stems.STEM_CHOICES), {
-                "default": _stems.STEM_SONG,
-                "tooltip": "Which part of the Custom Audio File is used. Song = the whole mix. "
+                "default": _stems.STEM_FULL,
+                "tooltip": "Which part of the Custom Audio File is used. Full = the whole mix. "
                            "Vocals / Guitars / Drums / Bass = only that stem (Guitars is Demucs' 'other' stem: "
                            "guitars + keys + synths). The first time a stem is chosen for a NEW song, Hybrid Demucs "
                            "separates all four (about 13 s for a 2 minute song) and saves them to "
@@ -1590,53 +767,37 @@ class IronLeo78_MTV:
         r["megapixels"] = ("FLOAT", {
             "default": DEFAULT_MEGAPIXELS, "min": 0.1, "max": 1.0, "step": 0.1,
             "tooltip": "Target size. Use Video ON: the video sets the aspect ratio and width/height. "
-                       "Use Video OFF: Picture1 does. Pictures 2-3 always keep their own aspect ratio.",
+                       "Use Video OFF: Picture_1 does. The other pictures always keep their own aspect ratio.",
         })
         r["duration"] = ("FLOAT", {
-            "default": DEFAULT_DURATION, "min": 0.0, "max": 10000.0, "step": 0.01,
+            "default": DEFAULT_DURATION, "min": 0.0, "max": 10000.0, "step": 0.1,      # v0.0.9: the arrows move it by 0.1 s (was 0.01)
             "tooltip": "Duration in seconds. Also sets the video segment length when Use Video is ON. "
                        "durationS = this value unchanged; durationF = Minimax frame count.",
         })
         r["Next Segment On Run"] = ("BOOLEAN", {
             "default": False, "label_on": "ON", "label_off": "OFF",
             "tooltip": "ON: every Run moves on to the next segment (video frames, and/or the custom audio "
-                       "chunk when Bypassed Audio Latent = Custom Audio). OFF: always the first segment.",
+                       "chunk when Choose Audio latent = Custom Audio). OFF: the same segment on every Run: the first one, "
+                       "or the one you chose with Go in the panel (the counter does not move).",
         })
         # ===== MiniMax H3 reference-to-video =====
         r["prompt"] = ("STRING", {
             "multiline": True, "dynamic_prompts": True, "default": "",
-            "tooltip": "Prompt. Refer to references as <Picture i> / <Video 1> / <Audio j>. "
+            "tooltip": "MTV_Prompt: the prompt, e.g. the output of the IronLeo78-MTV-Prompt-Generator. Refer to references as <Picture i> (the connected Picture_n inputs) / <Video 1> / <Audio j>. "
                        "Numbers count only what is actually sent: an empty picture slot is skipped "
-                       "(Picture1 + Picture3 filled = <Picture 1> and <Picture 2>). "
+                       "(Picture_1 + Picture_3 connected = <Picture 1> and <Picture 2>). "
                        "Audio order: video soundtrack first (if any), then custom audio. "
-                       "The status box lists the exact mapping.",
-        })
-
-        # ===== sampling =====
-        # ===== audio latent =====
-        r["Bypassed Audio Latent"] = ("BOOLEAN", {
-            "default": False, "label_off": "Audio From Video", "label_on": "Custom Audio",
-            "tooltip": "Which audio is used (and stepped through). "
-                       "This audio is encoded into the audio latent (Bypass Minimax is always on). "
-                       "Audio From Video = the video soundtrack (silence if none). "
-                       "Custom Audio = the Custom Audio File (silence if none). "
-                       "It also decides which audio Next Segment On Run moves through: "
-                       "Custom Audio = the song is cut into chunks as long as the real video "
-                       "segment (frames / fps: duration 5 s = 124 frames = 5.17 s), one chunk per Run "
-                       "(works with Use Video OFF too); the segment counter at the top of the node "
-                       "decides which chunk is next (Jump). "
-                       "Audio From Video = the video soundtrack follows its frames, "
-                       "the custom audio is then used whole.",
+                       "The status output lists the exact mapping.",
         })
         # ===== save latent (v0.6). Takes the place of the old "Latent Upscale" widget =====
         r["Save Latent"] = ("BOOLEAN", {
             "default": DEFAULT_SAVE_LATENT, "label_on": "ON", "label_off": "OFF",
-            "tooltip": "ON: besides the clip, the sampled latent (video + audio .latent files) and the conditioning "
-                       "(.conditioning: prompt + pictures, no guide) are saved in the song folder, next to the clip and "
-                       "sharing its name, so you can refine / upscale it later in another workflow. "
-                       "OFF (default): only the clip is saved.",
+            "tooltip": "ON (default): the sampled latent (video + audio .latent files) and the conditioning "
+                       "(.conditioning: prompt + pictures, no guide) are saved in the song folder, named like the clip "
+                       "(see the filename output), so you can refine / upscale it later in another workflow (2in1 Revitalizer). "
+                       "OFF: no latent files. (The clip itself is saved by the Save Video node you link.)",
         })
-        # ===== guide (v2.0). Appended LAST so saved workflows keep their widget order =====
+        # ===== guide (v2.0) =====
         r["Guide"] = ("BOOLEAN", {
             "default": True, "label_on": "ON", "label_off": "OFF",
             "tooltip": "Only works with Next Segment On Run = ON. ON: the last frame of the previous run "
@@ -1644,9 +805,9 @@ class IronLeo78_MTV:
                        "each other. The first segment (or a run with no saved frame from the segment "
                        "before) runs without a guide. OFF: no guide.",
         })
-        # ===== pictures (v2.8.2): the LAST widgets, so the pickers sit right above the thumbnail row =====
-        for i in range(1, cls.SLOTS + 1):
-            r[f"picture_{i}"] = ([NONE_CHOICE] + img_files, {"default": NONE_CHOICE, "image_upload": True})
+        # ===== pictures: NO widgets any more (v0.0.9H): the nine reference pictures come in through the optional IMAGE inputs
+        # Picture_1 .. Picture_9 below. The old picture_1..9 pickers and the More References switch were the LAST widgets, so
+        # removing them moves no saved value (the extra values of an old workflow are trimmed by the JS migration).
 
         # v2.3: optional link-only input (no widget, so saved widget values never shift).
         optional = {
@@ -1656,38 +817,58 @@ class IronLeo78_MTV:
                            "step counts. Nothing connected = the hardcoded defaults.",
             }),
         }
+        # v0.1.20: the nine legacy IMAGE sockets Picture_1 .. Picture_9 are GONE from the node. The reference pictures come in
+        # on ONE wire, `Pictures`, from the IronLeo78-MTV-Prompt-Generator (v0.1.19). No widget, so no saved widget value moves.
+        # (Old API prompts / old saved links that still carry a Picture_<n> key are still honoured in run(): see _spread_pictures.)
+        optional[PICTURES_INPUT] = (PICTURES_TYPE, {
+            "tooltip": "Optional. All nine reference pictures on one wire: connect the IronLeo78-MTV-Prompt-Generator's Pictures output. "
+                       "Empty slots are skipped (the <Picture n> numbers count only the filled ones).",
+        })
 
         return {"required": r, "optional": optional, "hidden": {"unique_id": "UNIQUE_ID",
                                           "workflow_prompt": "PROMPT",
                                           "extra_pnginfo": "EXTRA_PNGINFO"}}
 
-    RETURN_TYPES = ()          # v2.4: no output sockets (the status is shown inside the node)
-    RETURN_NAMES = ()
+    # v0.0.5: two output sockets. `video` = what Create Video made (hardcoded settings), to be linked by the user to a
+    # Save Video node; `filename` = the clip's name as the node always named it (see _plan_clip_name). The node itself
+    # no longer saves the clip and returns no saved-video preview.
+    # v0.0.9: a third output, `status` (STRING) = the run report. The status box at the bottom of the node is gone (it took
+    # space); link `status` to a Preview Any / text node to read it. It is the LAST output, so saved links keep working.
+    RETURN_TYPES = ("VIDEO", "STRING", "STRING")
+    RETURN_NAMES = ("video", "filename", "status")
     FUNCTION = "run"
     OUTPUT_NODE = True
     CATEGORY = "IronLeo78/MTV"
     DESCRIPTION = (
         "Minimax MTV: loader + MiniMax H3 reference-to-video + sampling + decode + "
-        "Create Video + Save Video, in one node.\n"
+        "Create Video, in one node.\n"
+        "v0.0.5: the node does not save the clip any more. Outputs: video (Create Video's result, settings hardcoded: "
+        "24 fps, sRGB, h264) -> link it to a Save Video node; filename (the clip's name as always named, "
+        "<Song>/<Song>_seg004_A_00001_, no extension: it names the .json, the manifest row and the latent files; "
+        "if you link it to a Save Video's filename_prefix, Save Video adds its own _00001_ after it).\n"
         "Models: Turbo + custom LoRA; diffusion model, attention backend, Qwen3-VL text encoder "
         "and the 2 VAEs are hardcoded (v2.3: the optional 'models' input takes a Model Loader node "
         "that can replace them, and the step counts).\n"
-        "Media: video (segment by segment) + up to three images + custom audio (whole song, or only its Vocals / Guitars / Drums / Bass: "
+        "Media: video (segment by segment) + up to nine reference images (the Pictures input) + custom audio (whole song, or only its Vocals / Guitars / Drums / Bass: "
         "Audio Stem; the stems are separated once per song and saved to output/<Song>/stems/).\n"
         "Sampling is hardcoded (BasicGuider, res_multistep, simple, denoise 1.0); "
-        "Turbo ON = 4 steps, Turbo OFF = 25 steps. The noise seed (default 1978) is set on the Model Loader node.\n"
-        "Audio Latent: always Bypass Minimax (hardcoded): the audio you give "
-        "(from the video or custom) is kept as is, the model never generates audio.\n"
+        "Turbo ON = 4 steps, Turbo OFF = 40 steps. The noise seed (default 1978) is set on the Model Loader node.\n"
+        "Choose Audio latent: Custom Audio / Audio From Video keep the audio you give as is (the model never "
+        "generates audio); MiniMax Audio works like the official ref2v template (the model generates the sound).\n"
         "Save Latent ON: the sampled latent (video + audio .latent files) and its conditioning (.conditioning) are "
-        "saved next to the clip for a later refine / upscale in another workflow. OFF (default): only the clip is saved.\n"
+        "saved in the song folder with the clip's name, for a later refine / upscale in another workflow. OFF (default): "
+        "no latent files.\n"
         "Files are tagged <Song>_seg<segment>_A (Song = the Custom Audio File name, if one is selected) "
         "and logged in a manifest CSV.\n"
-        "No outputs, no saved-video preview (the live latent preview stays): the clips are saved to the output folder and the run report is shown in the node.\n"
+        "No video preview on the node (the live latent preview while sampling stays). v0.0.9: no status box on the node either; "
+        "the run report leaves on the third output, status (STRING): link it to a Preview Any / text node to read it.\n"
         "v2.5: segment panel (count / next / Reset), progress in the report, a quiet stop after the last segment, "
         "and a <clip>.json sidecar with the full prompt next to every clip.\n"
         "v2.6: jump to any segment (number field + Go / Latest in the panel), and the Guide can read "
         "the previous segment's last frame back from its clip.\n"
         "v2.8: Scene 2 / prompt_2 / Picture4-6 are gone (one clip per Run).\n"
+        "Pictures (optional input, since v0.1.20 the only way to give reference pictures): the IronLeo78-MTV-Prompt-Generator's nine slots on "
+        "one wire; every filled slot is sent as <Picture n>.\n"
         "by IronLeo78"
     )
 
@@ -1696,19 +877,10 @@ class IronLeo78_MTV:
     # ================================================================== #
     @staticmethod
     def _load_unet(unet_name, weight_dtype):
-        model_options = {}
-        if weight_dtype == "fp8_e4m3fn":
-            model_options["dtype"] = torch.float8_e4m3fn
-        elif weight_dtype == "fp8_e4m3fn_fast":
-            model_options["dtype"] = torch.float8_e4m3fn
-            model_options["fp8_matrix_mult"] = True
-        elif weight_dtype == "fp8_e5m2":
-            model_options["dtype"] = torch.float8_e5m2
-
-        path = folder_paths.get_full_path_or_raise("diffusion_models", unet_name)
-        if hasattr(comfy.sd, "load_diffusion_model"):
-            return comfy.sd.load_diffusion_model(path, model_options=model_options)
-        return comfy.sd.load_unet(path)  # older ComfyUI
+        """v0.1.5: a clone of the ONE shared base model (model_cache.py; the Revitalizer uses the same one). The clone shares
+        the weights, so applying LoRAs to it never touches the base and never reads the model file again."""
+        base, _ = _models.diffusion_model(unet_name, weight_dtype)
+        return base.clone()
 
     @staticmethod
     def _apply_lora(model, lora_name, strength, label):
@@ -1716,11 +888,10 @@ class IronLeo78_MTV:
             return model
         path = folder_paths.get_full_path_or_raise("loras", lora_name)
 
-        lora = _LORA_CACHE.get(path)
+        lora = _lru_get(_LORA_CACHE, path)
         if lora is None:
-            _LORA_CACHE.clear()
             lora = comfy.utils.load_torch_file(path, safe_load=True)
-            _LORA_CACHE[path] = lora
+            _lru_put(_LORA_CACHE, path, lora, LORA_CACHE_MAX)
 
         model, _ = comfy.sd.load_lora_for_models(model, None, lora, strength, 0)
         log.info("[%s] applied %s @ %.2f", label, lora_name, strength)
@@ -1745,9 +916,10 @@ class IronLeo78_MTV:
         if kw["Turbo"]:
             model = _stage("turbo lora", self._apply_lora, model,
                            kw["turbo_lora_name"], kw["turbo_lora_strength"], "Turbo")
-        if kw["custom_lora_enabled"]:
-            model = _stage("lora", self._apply_lora, model,
-                           kw["custom_lora_name"], kw["custom_lora_strength"], "Custom LoRA")
+        for n in range(1, LORA_SLOTS + 1):       # v0.0.9: chained after the Turbo LoRA, in order
+            if kw[f"lora_{n}_enabled"]:
+                model = _stage(f"lora {n}", self._apply_lora, model,
+                               kw[f"lora_{n}_name"], kw[f"lora_{n}_strength"], f"LoRa_{n}")
         if kw["attention_enabled"]:
             model = self._apply_attention(model, kw["attention"])  # optional: never fatal
         return model
@@ -1795,8 +967,8 @@ class IronLeo78_MTV:
     # ------------------------------------------------------------------ #
     def _load_models(self, kw, uid):
         turbo_key = (_stamp("loras", kw["turbo_lora_name"]), kw["turbo_lora_strength"]) if kw["Turbo"] else None
-        custom_key = ((_stamp("loras", kw["custom_lora_name"]), kw["custom_lora_strength"])
-                      if kw["custom_lora_enabled"] else None)
+        custom_key = tuple((n, _stamp("loras", kw[f"lora_{n}_name"]), kw[f"lora_{n}_strength"])
+                           for n in range(1, LORA_SLOTS + 1) if kw[f"lora_{n}_enabled"])
 
         model_key = (_stamp("diffusion_models", kw["unet_name"]), kw["weight_dtype"],
                      turbo_key, custom_key,
@@ -1822,21 +994,6 @@ class IronLeo78_MTV:
     # ================================================================== #
     # MEDIA stage (video / audio / pictures) - unchanged logic
     # ================================================================== #
-    @staticmethod
-    def _load_one_image(name):
-        path = folder_paths.get_annotated_filepath(name)
-        img = Image.open(path)
-        try:
-            img.seek(0)
-        except Exception:
-            pass
-        img = ImageOps.exif_transpose(img)
-        if img.mode == "I":
-            img = img.point(lambda px: px * (1 / 255))
-        img = img.convert("RGB")
-        arr = np.array(img).astype(np.float32) / 255.0
-        return torch.from_numpy(arr)[None,]
-
     def _load_video(self, kw, frames, seconds, mp, index):
         """Returns (images, audio, w, h, filename, status).
         index = segment number (0 when Next Segment On Run is OFF; the segment counter sets it)."""
@@ -1846,47 +1003,24 @@ class IronLeo78_MTV:
         span = frames
         skip = index * span
 
-        arr, info = _decode_video(video, DEFAULT_FPS, skip, frames)
-        if arr is None:
+        # v0.1.1: every frame is cropped + shrunk right after it is decoded (see _video_frame_plan / _shape_video_frame), so only
+        # the target-size frames are kept: the same pixels as before, without the full-size float32 copy of the whole segment
+        plan = {}
+
+        def shape(arr):
+            if not plan:
+                plan["p"] = _video_frame_plan(int(arr.shape[1]), int(arr.shape[0]), mp)
+            return _shape_video_frame(arr, plan["p"])
+
+        images, info = _decode_video(video, DEFAULT_FPS, skip, frames, shape=shape)
+        if images is None:
             if index > 0:      # v2.5: every segment is done: stop quietly (the Run reports it, no error)
                 raise _EndOfSegments(f"End of video: segment {index + 1} would start at frame {skip}, "
                                      f"past the last frame.", index)
             raise RuntimeError("No frames could be loaded from this video.")
 
-        images = torch.from_numpy(arr).float().div_(255.0)
         rate = info["rate"]
         audio = _decode_audio(video, skip / rate, images.shape[0] / rate)  # None = no sound
-
-        orig_height = int(images.shape[1])
-        orig_width = int(images.shape[2])
-        r = orig_width / orig_height
-
-        # target size at the megapixel budget, multiples of 32
-        tw = math.sqrt(mp * 1_000_000 * r)
-        th = tw / r
-        target_width = max(32, int(round(tw / 32.0)) * 32)
-        target_height = max(32, int(round(th / 32.0)) * 32)
-
-        # center-crop to the final aspect so nothing is stretched
-        final_r = target_width / target_height
-        if orig_width / orig_height > final_r:
-            crop_h = orig_height
-            crop_w = int(round(orig_height * final_r))
-        else:
-            crop_w = orig_width
-            crop_h = int(round(orig_width / final_r))
-        crop_w = max(1, min(crop_w, orig_width))
-        crop_h = max(1, min(crop_h, orig_height))
-        sx = (orig_width - crop_w) // 2
-        sy = (orig_height - crop_h) // 2
-        images = images[:, sy:sy + crop_h, sx:sx + crop_w, :]
-
-        if images.shape[2] != target_width or images.shape[1] != target_height:
-            images = images.permute(0, 3, 1, 2)
-            images = F.interpolate(images, size=(target_height, target_width),
-                                   mode="bicubic", align_corners=False)
-            images = torch.clamp(images, 0.0, 1.0)
-            images = images.permute(0, 2, 3, 1)
 
         total = int(round(info["duration"] * rate)) if info["duration"] > 0 else 0
         end = skip + span - 1
@@ -1894,8 +1028,10 @@ class IronLeo78_MTV:
             end = min(end, total - 1)
 
         h, w = int(images.shape[1]), int(images.shape[2])
-        status = (f"Video ON | segment {index} | frames {skip} to {end} | next: {index + 1}"
-                  f" | resolution: {w}x{h} | total frames: {total}\n{CREDIT}")
+        turned = (f" | turned upright ({info['quarter_turns'] * 90} degrees: phone video)"
+                  if info.get("quarter_turns") else "")      # v0.1.3
+        status = (f"Video ON | {_segment_txt(kw, index)} | frames {skip} to {end}"
+                  f" | resolution: {w}x{h}{turned} | total frames: {total}\n{CREDIT}")
         return images, audio, w, h, filename, status
 
     @staticmethod
@@ -1920,8 +1056,8 @@ class IronLeo78_MTV:
             raise RuntimeError(msg)
         sr = float(audio["sample_rate"])
         got = audio["waveform"].shape[-1] / sr
-        note = (f"video audio only (Use Video OFF): {name} | segment {index} | "
-                f"{start_s:.2f}s to {start_s + got:.2f}s | next: {index + 1}")
+        note = (f"video audio only (Use Video OFF): {name} | {_segment_txt(kw, index)} | "
+                f"{start_s:.2f}s to {start_s + got:.2f}s")
         missing = int(round(seg_seconds * sr)) - audio["waveform"].shape[-1]
         if missing > 0:
             audio = {**audio, "waveform": F.pad(audio["waveform"], (0, missing))}
@@ -1931,16 +1067,16 @@ class IronLeo78_MTV:
     # ------------------------------------------------------------------ #
     @staticmethod
     def _prepare_stems(kw):
-        """Audio Stem other than Song: make sure the song's stems are on disk. Returns the line for the status box
+        """Audio Stem other than Full: make sure the song's stems are on disk. Returns the line for the status output
         ('' when no stem is used). Runs before the models are loaded so Demucs gets the GPU memory to itself."""
         stem = _stem_choice(kw)
         name = kw.get("Custom Audio File")
-        if stem == _stems.STEM_SONG or not name or name == NONE_CHOICE:
+        if stem == _stems.STEM_FULL or not name or name == NONE_CHOICE:
             return ""
         bar = None
         try:
             bar = comfy.utils.ProgressBar(100)
-        except Exception:
+        except Exception:      # intentionally silent: the progress bar is optional
             pass
 
         def progress(done, total):
@@ -1967,75 +1103,39 @@ class IronLeo78_MTV:
         seg_seconds = frames / out_fps
 
         # segment number, shared by the video frames and the custom audio chunks
-        chunk_custom = bool(kw["Bypassed Audio Latent"])  # True = chunk the Custom Audio
-        index = _load_index() if kw["Next Segment On Run"] else 0
-        # Always advance (even when OFF) so the first ON run continues at segment 1.
+        audio_mode = _audio_mode(kw["Choose Audio latent"])
+        chunk_custom = audio_mode == AUDIO_CUSTOM  # True = chunk the Custom Audio
+        index = _run_index(kw)      # v0.1.8: this song's counter; v0.2.3: an OFF Run repeats the segment chosen with Go
+        # (until 0.1.9 an OFF Run also advanced the counter to 1; since 0.1.10 it leaves it alone, see below)
         # Saved by run() only after the whole node succeeded (no burnt segment on error).
         stem = _stem_choice(kw)
         custom_full = _load_audio_for_stem(kw.get("Custom Audio File"), stem)  # None if not selected
 
-        # Use Video OFF only drops the images: with Bypass Minimax (always on) and
-        # Bypassed Audio Latent = Audio From Video, a selected Video File still supplies its
-        # soundtrack (audio only, no frames are decoded, Picture1 still sets the size).
+        # Use Video OFF only drops the images: with a bypassed audio latent and
+        # Choose Audio latent = Audio From Video, a selected Video File still supplies its
+        # soundtrack (audio only, no frames are decoded, Picture_1 still sets the size).
         audio_only_path = None
-        if not use_video and not chunk_custom:
+        if not use_video and audio_mode == AUDIO_VIDEO:
             sel = kw.get("Video File")
             if sel and sel != NONE_CHOICE and folder_paths.exists_annotated_filepath(sel):
                 audio_only_path = _resolve_video_path(sel)
 
-        if use_video or (chunk_custom and custom_full is not None) or audio_only_path or kw.get("Guide", False):
+        # v0.1.9 -> v0.1.10 (review #9, the user's decision): a Run with Next Segment On Run OFF no longer moves the counter
+        # (it used to set it to 1, losing a Jump position); only stepping Runs advance it.
+        if kw["Next Segment On Run"] and (use_video or (chunk_custom and custom_full is not None) or audio_only_path
+                                          or kw.get("Guide", False)):
             self._pending_index = index + 1
 
-        custom_audio, audio_note = custom_full, ""
         custom_id = _file_id(kw.get("Custom Audio File")) if custom_full is not None else None
-        if custom_id is not None and stem != _stems.STEM_SONG:
+        if custom_id is not None and stem != _stems.STEM_FULL:
             custom_id = custom_id + (stem,)       # the conditioning / audio-latent caches must tell the stems apart
-        cond_audio2 = None
         cond_audio1 = None
         cond_video = None
-        if custom_full is not None and chunk_custom:
-            c_start = index * seg_seconds
-            custom_audio = _slice_audio(custom_full, c_start, seg_seconds)
-            if custom_audio is None:
-                total_s = custom_full["waveform"].shape[-1] / float(custom_full["sample_rate"])
-                msg = (f"End of custom audio: segment {index + 1} would start at {c_start:.2f}s, "
-                       f"past its end ({total_s:.2f}s).")
-                if index > 0:      # v2.5: quiet stop
-                    raise _EndOfSegments(msg, index)
-                raise RuntimeError(msg)
-            sr = float(custom_audio["sample_rate"])
-            got = custom_audio["waveform"].shape[-1] / sr
-            cond_audio2 = ("a2c", custom_id, round(float(c_start), 4), round(float(seg_seconds), 6))
-            audio_note = (f"custom audio chunk: segment {index} | {c_start:.2f}s to {c_start + got:.2f}s"
-                          f" | segment {seg_seconds:.3f}s = {frames} frames @ {out_fps:g} fps | next: {index + 1}")
-            missing = int(round(seg_seconds * sr)) - custom_audio["waveform"].shape[-1]
-            if missing > 0:
-                # last chunk: pad with silence so it is as long as the video (audio latent stays aligned)
-                padded = F.pad(custom_audio["waveform"], (0, missing))
-                custom_audio = {**custom_audio, "waveform": padded}
-                audio_note += f" | end of audio: padded with {missing / sr:.2f}s of silence"
-        elif custom_full is not None:
-            cond_audio2 = ("a2w", custom_id)
-            audio_note = "custom audio: whole file (Bypassed Audio Latent = Audio From Video)"
+        custom_audio, audio_note, cond_audio2 = _custom_audio_chunk(kw, custom_full, custom_id, chunk_custom, audio_mode,
+                                                                    index, seg_seconds, frames, out_fps)
 
-        # 1) load pictures at native size
-        raw = []
-        for i in range(1, self.SLOTS + 1):
-            name = kw[f"picture_{i}"]
-            if name == NONE_CHOICE:
-                raw.append(None)
-                continue
-            try:
-                raw.append(self._load_one_image(name))
-            except Exception as e:
-                log.error("[Picture%d] failed to load %s: %s", i, name, e)
-                raise RuntimeError(
-                    f"[IronLeo78 MTV] Picture{i} ('{name}') failed: {e}"
-                ) from e
-
-        # 2) every picture -> megapixel target, keeping its OWN aspect ratio
-        sizes = [None if img is None else _target_size(img.shape[2], img.shape[1], mp, DIVISIBLE_BY)
-                 for img in raw]
+        # 1) + 2) the wired pictures at native size, each with its megapixel target (own aspect ratio)
+        raw, linked, sizes = _reference_pictures(kw, self.SLOTS, mp)
 
         # 3) reference size + video
         if use_video:
@@ -2058,14 +1158,14 @@ class IronLeo78_MTV:
                 cond_audio1 = ("a1o", _file_id(kw.get("Video File")),
                                (index * int(frames)) / out_fps,
                                round(float(seg_seconds), 6))
-            p1 = kw.get("picture_1", NONE_CHOICE)
-            filename = os.path.splitext(os.path.basename(p1))[0] if p1 != NONE_CHOICE else ""
-            status = f"Video OFF | reference: Picture1 | filename: {filename} | resolution: {w}x{h}\n{CREDIT}"
+            # a Picture_1 input has no file name: nothing to name the clip after (custom audio still wins)
+            filename = ""
+            status = (f"Video OFF | reference: Picture_1{'' if 1 in linked else ' (not connected: 1x1 size)'} | "
+                      f"filename: {filename} | resolution: {w}x{h}\n{CREDIT}")
             if video_audio_note:
                 status += "\n" + video_audio_note
 
-        if audio_note:
-            status += "\n" + audio_note
+        status += _media_status_lines(audio_note, chunk_custom, custom_full, linked, kw)
 
         # position of this segment in the song / video (seconds), for the manifest
         if custom_full is not None and chunk_custom:
@@ -2075,18 +1175,15 @@ class IronLeo78_MTV:
         else:
             timeline = index * seg_seconds if self._pending_index is not None else 0.0
 
-        # 4) resize pictures (empty slots stay None: nothing is sent for them)
-        pictures = [None if img is None else _resize(img, size[0], size[1], RESIZE_METHOD)
-                    for img, size in zip(raw, sizes)]
-        pic_ids = [None if img is None else ("p", _file_id(kw[f"picture_{i}"]), size)
-                   for i, (img, size) in enumerate(zip(raw, sizes), start=1)]
+        # 4) resize pictures (empty slots stay None: nothing is sent for them) and fingerprint the RESIZED ones
+        pictures, pic_ids = _resized_pictures(raw, sizes)
 
         return {"video": video1, "audio1": audio1, "audio2": custom_audio,
                 "pictures": pictures, "width": w, "height": h,
                 "seconds": seconds, "seg_seconds": seg_seconds, "frames": int(frames),
                 "filename": filename, "status": status, "index": index,
                 "audio_stem": stem if custom_full is not None else "",
-                "timeline_start": float(timeline),
+                "timeline_start": float(timeline), "counter_key": kw.get("counter_key", ""),      # v0.1.8
                 # what the references CONTAIN (for the conditioning cache): file ids + the slice taken
                 "cond_id": {"video": cond_video, "audio1": cond_audio1, "audio2": cond_audio2,
                             "pics": pic_ids}}
@@ -2188,7 +1285,7 @@ class IronLeo78_MTV:
     # ================================================================== #
     def _apply_guide(self, positive, latent, vae_video, media, notes):
         index = int(media["index"])
-        frame, why = _load_last_frame(index, media.get("song"))
+        frame, why = _load_last_frame(index, media.get("song"), key=media.get("counter_key", ""))      # v0.1.8: this song's frame
         if frame is None:
             return positive, latent, f"guide: ON, not used ({why})"
         frame = _fit_frame(frame, int(media["width"]), int(media["height"]))
@@ -2206,10 +1303,18 @@ class IronLeo78_MTV:
     # AUDIO LATENT stage (the "Bypass Minimax" branch of the old switches)
     # ================================================================== #
     def _build_latent(self, latent, vae_audio, kw, media, notes, models_key):
-        """v2.8.4: always Bypass Minimax -> TrimAudioDuration -> VAEEncodeAudio ->
+        """Custom Audio / Audio From Video (bypass): TrimAudioDuration -> VAEEncodeAudio ->
         SetLatentNoiseMask(SolidMask 0) -> LTXVConcatAVLatent(minimax latent, audio latent).
-        The encoded audio latent is cached (so a re-run does not encode it again)."""
-        custom = bool(kw["Bypassed Audio Latent"])
+        The encoded audio latent is cached (so a re-run does not encode it again).
+
+        MiniMax Audio (v0.0.4): NO bypass. Exactly like ComfyUI's official ref2v template, the LATENT output of
+        MiniMaxH3ReferenceToVideo goes to the sampler as it is, so the model generates the audio itself (it already
+        holds the audio latent) and VAE Decode / VAE Decode Audio read the sampled latent. Nothing is trimmed,
+        encoded, masked or concatenated here."""
+        mode = _audio_mode(kw["Choose Audio latent"])
+        if mode == AUDIO_MINIMAX:
+            return latent, "audio: MiniMax Audio (the model's own audio latent, no bypass)"
+        custom = mode == AUDIO_CUSTOM
         audio = media["audio2"] if custom else media["audio1"]
         source = "custom audio" if custom else "audio from video"
         ident = media["cond_id"]["audio2" if custom else "audio1"]
@@ -2278,76 +1383,22 @@ class IronLeo78_MTV:
         return video, fps
 
     @staticmethod
-    def _save_manual(video, prefix, hidden):
-        """Last resort when the core SaveVideo node cannot be driven: plain mp4/h264 save."""
-        try:
-            from comfy_api.latest import Types
-        except Exception:
-            from comfy_api.input_impl import VideoFromComponents  # noqa: F401 (older layout)
-            from comfy_api.util import VideoCodec, VideoContainer
-            Types = type("Types", (), {"VideoCodec": VideoCodec, "VideoContainer": VideoContainer})
-        width, height = video.get_dimensions()
-        folder, name, counter, subfolder, _ = folder_paths.get_save_image_path(
-            prefix, folder_paths.get_output_directory(), width, height)
-        meta = {}
-        try:
-            from comfy.cli_args import args
-            skip_meta = bool(args.disable_metadata)
-        except Exception:
-            skip_meta = False
-        if not skip_meta:
-            if hidden.get("EXTRA_PNGINFO"):
-                meta.update(hidden["EXTRA_PNGINFO"])
-            if hidden.get("PROMPT") is not None:
-                meta["prompt"] = hidden["PROMPT"]
-        file = f"{name}_{counter:05}_.{SAVE_FORMAT}"
-        video.save_to(os.path.join(folder, file),
-                      format=Types.VideoContainer(SAVE_FORMAT), codec=Types.VideoCodec(SAVE_CODEC),
-                      metadata=meta or None)
-        return {"images": [{"filename": file, "subfolder": subfolder, "type": "output"}],
-                "animated": (True,)}
-
-    def _save_video(self, video, prefix, hidden, notes):
-        provided = {"video": video, "filename_prefix": prefix, "format": SAVE_FORMAT,
-                    "codec": SAVE_CODEC, "encoding": SAVE_ENCODING}
-        errors = []
-        # Layout 1: nested dynamic combos only. Layout 2: also pass the inputs that the schema
-        # lists at top level as separate arguments. The first one the node accepts wins.
-        for hoist in (False, True):
-            attempt_notes = []
-            try:
-                _, ui = _core("SaveVideo", provided, strict=("video", "filename_prefix"),
-                              hidden=hidden, notes=attempt_notes, hoist=hoist)
-                notes.extend(attempt_notes)
-                if ui:
-                    return ui
-                notes.append("SaveVideo returned no preview info")
-                return None
-            except Exception as e:
-                if _is_interrupt(e):
-                    raise
-                log.warning("Core SaveVideo (layout %d) failed: %s", 2 if hoist else 1, e)
-                errors.append(str(e))
-
-        try:
-            cls = comfy_nodes.NODE_CLASS_MAPPINGS["SaveVideo"]
-            types = cls.INPUT_TYPES()
-            sch = {k: (sec, sp) for sec in ("required", "optional")
-                   for k, sp in (types.get(sec) or {}).items()}
-            detail = f" [SaveVideo inputs: {_describe_schema(sch)}]"
-        except Exception:
-            detail = ""
-        notes.append(f"core SaveVideo failed ({' / '.join(errors)}); saved with the built-in fallback{detail}")
-        return self._save_manual(video, prefix, hidden)
+    def _plan_clip_name(st):
+        """v0.0.5: the node no longer saves the clip (the user links the `video` output to a Save Video node), but every
+        other file keeps the old naming: <tag>_NNNNN_ is the number the clip WOULD have got. The planned name
+        '<Song>/<Song>_seg004_A_00001_.mp4' is what the sidecar .json, the manifest row, the latent files and the
+        `filename` output use. Chosen once per clip (a redo gets the next free number, so nothing is overwritten)."""
+        if st.get("file"):
+            return st["file"]
+        parent = os.path.dirname(str(st["prefix"]).replace("\\", "/"))
+        name = f"{st['tag']}_{_clip_counter(st):05d}_.{SAVE_FORMAT}"
+        st["file"] = "/".join(p for p in (parent, name) if p)
+        return st["file"]
 
     @staticmethod
-    def _saved_name(ui):
-        """'subfolder/filename' of what SaveVideo reported (for the status text)."""
-        try:
-            img = (ui or {})["images"][0]
-            return "/".join(p for p in (img.get("subfolder"), img.get("filename")) if p)
-        except Exception:
-            return "?"
+    def _filename_out(st):
+        """The `filename` output: the planned clip name without its extension (e.g. Song/Song_seg004_A_00001_)."""
+        return os.path.splitext(str(st.get("file") or ""))[0]
 
     # ================================================================== #
     # CLIP PIPELINE (one clip per Run). The stages are separate steps so the text encoder, the diffusion model and
@@ -2355,26 +1406,30 @@ class IronLeo78_MTV:
     # ================================================================== #
     def _clip_new(self, kw, media):
         prefix, tag = _clip_prefix(kw, media)
-        names = [kw[f"picture_{i}"] for i in range(1, self.SLOTS + 1) if kw[f"picture_{i}"] != NONE_CHOICE]
+        names = []
+        for i in range(1, self.SLOTS + 1):
+            if kw.get(_picture_input(i)) is not None:      # a linked image has no file: the slot's socket name stands in
+                names.append(f"{_picture_input(i)} (linked)")
         return {
             "prompt": kw["prompt"], "prefix": prefix, "tag": tag,
             "pictures": names, "notes": [], "fps": DEFAULT_FPS,
             "positive": None, "positive_plain": None, "latent": None, "samples": None, "sampler": None,
             "refs_line": "", "guide_line": "", "audio_line": "",
-            "images": None, "audio": None, "video": None, "ui": {},
+            "images": None, "audio": None, "video": None,
             "file": "", "last_frame": None, "logged": False,
             "latent_files": None, "latent_info": None, "latent_line": "",
             "clip_meta": {"index": int(media.get("index", 0)), "frames": int(media.get("frames", 0)),
                           "width": int(media.get("width", 0)), "height": int(media.get("height", 0)),
                           "seg_seconds": float(media.get("seg_seconds", 0.0)),
                           "timeline_start": float(media.get("timeline_start", 0.0)),
-                          "audio_stem": media.get("audio_stem") or ""},
+                          "audio_stem": media.get("audio_stem") or "",
+                          "project": _project_name(kw, media)},      # v0.0.9: song, else video name (latent file headers)
         }
 
     @staticmethod
     def _maybe_drop(st):
-        """v2.4: there are no output sockets, so the decoded frames / audio / video are freed at once."""
-        st["images"] = st["audio"] = st["video"] = None
+        """The decoded frames / audio are freed at once; the created video stays: it leaves on the `video` output."""
+        st["images"] = st["audio"] = None
 
     def _phase_prepare(self, st, clip, vae_video, vae_audio, kw, media, models_key):
         notes = st["notes"]
@@ -2400,11 +1455,12 @@ class IronLeo78_MTV:
         """Save Latent ON: save the sampled latent and its conditioning for a later refine / upscale, in the
         song folder next to the clip, all sharing the clip's name:
             <tag>_NNNNN_.mp4   <tag>_NNNNN_video.latent   <tag>_NNNNN_audio.latent   <tag>_NNNNN.conditioning
-        Called once the clip is saved (writing these files earlier would make SaveVideo skip a number), and also when the
-        decode / save fails, so an error never loses the sampled latent.
+        Called once the clip is made (v0.0.5: the number comes from _plan_clip_name: the next free one for this prefix,
+        counting these files too, so a redo never overwrites), and also when the decode fails, so an error never loses
+        the sampled latent.
         The conditioning is the plain one (prompt + pictures, no guide).
         Never fatal: a problem here is a note, the clip is still made."""
-        if not kw.get("Save Latent", DEFAULT_SAVE_LATENT) or st["samples"] is None or st.get("latent_files"):
+        if not kw.get("Save Latent", SAVE_LATENT_MISSING) or st["samples"] is None or st.get("latent_files"):
             return
         notes = st["notes"]
         try:
@@ -2419,7 +1475,7 @@ class IronLeo78_MTV:
             files = {k: "/".join(p for p in (parent, n) if p) for k, n in names.items()}
             os.makedirs(os.path.dirname(os.path.join(out_dir, *files["video"].split("/"))), exist_ok=True)
             m = st["clip_meta"]
-            meta = {"ironleo78": json.dumps({"version": VERSION, "song": _song_name(kw), "tag": st["tag"],
+            meta = {"ironleo78": json.dumps({"version": VERSION, "song": m.get("project", ""), "tag": st["tag"],
                                              "segment": m["index"], "seed": int(kw["noise_seed"]),
                                              "width": m["width"], "height": m["height"],
                                              "frames": m["frames"], "fps": st["fps"]})}
@@ -2455,17 +1511,23 @@ class IronLeo78_MTV:
             notes.append(f"latent not saved ({e})")
 
     def _phase_clip(self, st, vae_video, vae_audio, kw, hidden):
-        """decode -> Create Video -> Save Video, then the latent files when Save Latent is ON."""
+        """decode -> Create Video (hardcoded settings), then the latent files when Save Latent is ON.
+        v0.0.5: no Save Video here: the video goes out on the node's `video` output."""
         notes = st["notes"]
+        try:
+            self._plan_clip_name(st)            # the clip's name (old naming), also for the latent files
+        except Exception as e:
+            if _is_interrupt(e):
+                raise
+            log.warning("Could not plan the clip name: %s", e)
+            notes.append(f"clip name not planned ({e})")
         try:
             images, audio = _stage("decode", self._decode, st["samples"], vae_video, vae_audio, notes)
             video, st["fps"] = _stage("create video", self._create_video, images, audio, kw, notes)
-            st["ui"] = _stage("save video", self._save_video, video, st["prefix"], hidden, notes) or {}
         except Exception as e:
             if not _is_interrupt(e):
-                self._save_latents(st, kw)      # a decode / save error still keeps the sampled latent
+                self._save_latents(st, kw)      # a decode error still keeps the sampled latent
             raise
-        st["file"] = self._saved_name(st["ui"])
         self._save_latents(st, kw)              # Save Latent ON: latent + conditioning, named after the clip
         st["last_frame"] = _last_frame_of(images)
         st["images"], st["audio"], st["video"] = images, audio, video
@@ -2480,7 +1542,7 @@ class IronLeo78_MTV:
                 + [st["audio_line"] + f" | seed {int(kw['noise_seed'])} | steps {int(kw['steps'])} | {st['fps']:g} fps"
                    + f" | turbo {'ON' if kw['Turbo'] else 'OFF'}"]
                 + ([st["latent_line"]] if st["latent_line"] else [])
-                + [f"saved: {st['file']}"])
+                + [f"clip name: {st['file'] or '?'} (not saved by this node: link the video output to a Save Video node)"])
 
     def _manifest_row(self, res, kw, media, prompt_json=""):
         start = float(media.get("timeline_start", 0.0))
@@ -2490,7 +1552,7 @@ class IronLeo78_MTV:
             prompt = prompt[:MANIFEST_PROMPT_CHARS - 1].rstrip() + "\u2026"
         return {
             "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
-            "song": _song_name(kw),
+            "song": _project_name(kw, media),
             "segment": int(media["index"]),
             "scene": SCENE_TAG,
             "start_s": f"{start:.2f}", "end_s": f"{start + seg:.2f}", "duration_s": f"{seg:.3f}",
@@ -2513,21 +1575,23 @@ class IronLeo78_MTV:
         return {
             "version": VERSION, "kind": "clip",
             "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
-            "song": _song_name(kw), "tag": st["tag"],
+            "song": _project_name(kw, media), "tag": st["tag"],
             "segment": idx, "segment_number": idx + 1, "segment_total": media.get("segment_total"),
             "file": st["file"],
             "start_s": round(start, 2), "end_s": round(start + seg, 2), "duration_s": round(seg, 3),
             "frames": int(media["frames"]), "width": int(media["width"]), "height": int(media["height"]),
             "fps": st["fps"], "seed": int(kw["noise_seed"]), "turbo": bool(kw["Turbo"]), "steps": int(kw["steps"]),
-            "save_latent": bool(kw.get("Save Latent", DEFAULT_SAVE_LATENT)),
-            "custom_lora": ({"file": kw["custom_lora_name"], "strength": kw["custom_lora_strength"]}
-                            if kw.get("custom_lora_enabled") else None),
+            "save_latent": bool(kw.get("Save Latent", SAVE_LATENT_MISSING)),
+            "custom_loras": [{"slot": n, "file": kw[f"lora_{n}_name"], "strength": kw[f"lora_{n}_strength"]}
+                             for n in range(1, LORA_SLOTS + 1) if kw.get(f"lora_{n}_enabled")] or None,
             "pictures": list(st["pictures"]), "references": st["refs_line"],
             "audio": st["audio_line"], "audio_stem": media.get("audio_stem") or None,
             "latent": st.get("latent_files") or None,
             "latent_details": st.get("latent_info") or None,
             "guide": st["guide_line"] or None,
-            "models": {k: kw[k] for k in MODEL_FILE_KEYS}, "models_source": "Model Loader" if kw["models_source"] else "hardcoded",
+            "models": {k: kw[k] for k in MODEL_FILE_KEYS},
+            "models_source": ("Model Loader" if kw["models_source"]          # v0.0.9w: the saved set was reported as "hardcoded"
+                              else "saved defaults" if kw.get("defaults_custom") else "hardcoded"),
             "prompt": str(st["prompt"]),
         }
 
@@ -2545,7 +1609,7 @@ class IronLeo78_MTV:
                 run_notes.append(f"prompt sidecar for {st['file']} not written ({e})")
         first = sidecar
         try:
-            note = f"manifest: {_append_manifest(_song_name(kw), [self._manifest_row(st, kw, media, first)])}"
+            note = f"manifest: {_append_manifest(_project_name(kw, media), [self._manifest_row(st, kw, media, first)])}"
             return note + (f" | full prompt: {first}" if first else "")
         except Exception as e:
             log.warning("Could not write the manifest: %s", e)
@@ -2555,18 +1619,41 @@ class IronLeo78_MTV:
     # ================================================================== #
     def run(self, unique_id=None, workflow_prompt=None, extra_pnginfo=None, models=None, **kw):
         global _RUNNING
+        _spread_pictures(kw)      # v0.1.19
+        if "Bypassed Audio Latent" in kw:      # v0.0.5: the widget was renamed (old API prompts / scripts)
+            kw.setdefault("Choose Audio latent", kw["Bypassed Audio Latent"])
+            del kw["Bypassed Audio Latent"]
+        if kw.get("Audio Stem") == _stems.STEM_LEGACY_SONG:      # v0.0.6: the stem "Song" is now called "Full" (old API prompts)
+            kw["Audio Stem"] = _stems.STEM_FULL
         kw.update(FIXED_SETTINGS)  # hardcoded values (no widgets for them)
         kw["noise_seed"] = DEFAULT_SEED   # v2.8.5: no widget; the Model Loader may replace it (below)
+        kw["defaults_custom"] = apply_saved_defaults(kw)   # v0.0.9: the defaults the user saved with the Model Loader's "Set New Defaults"
         # v2.3: the Model Loader (optional "models" input) may replace the hardcoded models / steps
         kw["models_source"], kw["models_changed"] = apply_model_overrides(kw, models)
-        kw["steps"] = kw["turbo_steps"] if kw["Turbo"] else kw["full_steps"]   # default: Turbo ON = 4, OFF = 25
-        kw.setdefault("Save Latent", DEFAULT_SAVE_LATENT)              # v0.6 (a workflow without the widget: OFF)
+        kw["steps"] = kw["turbo_steps"] if kw["Turbo"] else kw["full_steps"]   # default: Turbo ON = 6, OFF = 30 (v0.1.11)
+        kw.setdefault("Save Latent", SAVE_LATENT_MISSING)              # v0.6 (a workflow without the widget: OFF; a NEW node is ON since 0.1.11)
+        kw["counter_key"] = _counter_key(kw)      # v0.1.8: whose segment counter this Run uses (its song, else its video)
+        # v0.0.9v: an empty slot of the Prompt Generator still sends its grey "NONE" picture: that input counts as not connected
+        kw["none_pictures"] = [i for i in range(1, self.SLOTS + 1) if _is_none_placeholder(kw.get(_picture_input(i)))]
+        for i in kw["none_pictures"]:
+            kw[_picture_input(i)] = None
         self._pending_index = None
         _RUNNING += 1
         try:
             return self._run(unique_id, workflow_prompt, extra_pnginfo, kw)
         finally:
             _RUNNING -= 1
+
+    @staticmethod
+    def _loader_label(kw):
+        """v0.0.9: status text for a connected Model Loader. With a saved set (Set New Defaults) it says whether the loader still
+        holds that set (same on both sides) or which values differ from it (the loader's live values win for this run)."""
+        changed = kw["models_changed"]
+        if not kw.get("defaults_custom"):
+            return f"Model Loader ({changed})"
+        if changed == "nothing changed from the defaults":
+            return "Model Loader (same as the saved set)"
+        return f"Model Loader (DIFFERS from the saved set: {changed})"
 
     def _finished(self, kw, done, detail=""):
         """v2.5: every segment is made. Nothing is generated, nothing is raised, the counter does not move."""
@@ -2577,7 +1664,9 @@ class IronLeo78_MTV:
         if detail:
             status += "\n" + detail
         log.info("\n%s", status)
-        return {"ui": {"text": [status]}, "result": ()}
+        blocked = ExecutionBlocker(None) if ExecutionBlocker is not None else None
+        # nothing reaches a linked Save Video; the status text itself still leaves (it says why nothing was made)
+        return {"ui": {"text": [status]}, "result": (blocked, blocked, status)}
 
     def _run(self, unique_id, workflow_prompt, extra_pnginfo, kw):
         notes = []
@@ -2588,8 +1677,9 @@ class IronLeo78_MTV:
                 total = _segment_plan(kw)["total"]
             except Exception as e:
                 log.debug("segment plan failed: %s", e)
-            if total is not None and _load_index() >= total:
-                return self._finished(kw, _load_index())     # quiet stop BEFORE any model is loaded
+            at = _load_index(kw["counter_key"])
+            if total is not None and at >= total:
+                return self._finished(kw, at)     # quiet stop BEFORE any model is loaded
         # Models first: a model error must not burn a video segment.
         _check_models(kw)
         stem_note = self._prepare_stems(kw)      # Hybrid Demucs (first use of a new song only), BEFORE the big models load
@@ -2603,7 +1693,7 @@ class IronLeo78_MTV:
         media["segment_total"] = total
         if stem_note:
             media["status"] += "\n" + stem_note
-        media["song"] = _song_name(kw)         # v2.6: the Guide can read a last frame back from the manifest clips
+        media["song"] = _project_name(kw, media)         # v2.6: the Guide can read a last frame back from the manifest clips
         hidden = {"UNIQUE_ID": unique_id, "PROMPT": workflow_prompt, "EXTRA_PNGINFO": extra_pnginfo}
 
         st = self._clip_new(kw, media)
@@ -2615,7 +1705,7 @@ class IronLeo78_MTV:
             self._phase_clip(st, vae_video, vae_audio, kw, hidden)
         except Exception:
             # a clip that is already on disk (saved, then something failed) is logged (never fatal)
-            if st["file"] and not st["logged"]:
+            if st["file"] and st["video"] is not None and not st["logged"]:      # only a clip that was really made
                 self._log_clip(st, kw, media, notes)
             raise
         manifest_note = self._log_clip(st, kw, media, notes)
@@ -2624,11 +1714,11 @@ class IronLeo78_MTV:
         if self._pending_index is not None:
             if st["last_frame"] is not None:
                 try:      # the last frame of this clip, for the Guide of the next run (never fatal)
-                    _save_last_frame(st["last_frame"], self._pending_index - 1)
+                    _save_last_frame(st["last_frame"], self._pending_index - 1, kw["counter_key"])
                 except Exception as e:
                     log.warning("Could not save the last frame for the guide: %s", e)
                     notes.append(f"last frame not saved ({e})")
-            _save_index(self._pending_index)
+            _save_index(self._pending_index, kw["counter_key"])
 
         # ---- status text ----
         start = float(media.get("timeline_start", 0.0))
@@ -2636,14 +1726,14 @@ class IronLeo78_MTV:
         if kw["Next Segment On Run"]:
             seg_txt = (f"segment {idx + 1} of {total}" if total else f"segment {idx + 1}") + f" (seg{idx:03d})"
         else:
-            seg_txt = f"segment {idx}"
-        header = (f"SONG: {_song_name(kw) or '(no custom audio: video / Picture1 name)'} | {seg_txt}"
+            seg_txt = f"segment {idx + 1}"       # v0.0.9w: counted from 1 like everywhere else (the segment chosen with Go; 1 by default)
+        header = (f"SONG: {_project_name(kw, media) or '(no custom audio, no video name)'} | {seg_txt}"
                   f" | {start:.2f}s to {start + float(media['seg_seconds']):.2f}s")
         if kw["Next Segment On Run"] and total:
             left = total - (idx + 1)
             header += (f"\nprogress: {idx + 1} of {total} segments done ({100.0 * (idx + 1) / total:.0f} %)"
                        + (" | that was the LAST segment: the next Run stops quietly" if left <= 0 else f" | {left} left"))
-        header += "\nmodels: " + (f"Model Loader ({kw['models_changed']})" if kw["models_source"] else "hardcoded defaults")
+        header += "\nmodels: " + (self._loader_label(kw) if kw["models_source"] else "saved defaults (Set New Defaults)" if kw.get("defaults_custom") else "hardcoded defaults")
         status = media["status"] + "\n" + header
         status += f"\n--- {st['tag']} ---\n" + "\n".join(self._clip_lines(st, kw))
         if st["notes"]:
@@ -2654,8 +1744,12 @@ class IronLeo78_MTV:
             status += "\nnotes: " + "; ".join(notes)
         log.info("\n%s", status)
 
-        # v2.5: only the text for the node's own status box. No "images" entry = no video preview on the node.
-        return {"ui": {"text": [status]}, "result": ()}
+        # No "images" entry = no video preview on the node (v0.0.5: there is no saved clip any more). The video, the clip
+        # name and the report leave on the three outputs (v0.0.9: no status box on the node any more; the "text" entry
+        # stays only so the frontend still gets its "executed" event after a run).
+        video = st["video"]
+        st["video"] = None
+        return {"ui": {"text": [status]}, "result": (video, self._filename_out(st), status)}
 
     # ------------------------------------------------------------------ #
     @classmethod
@@ -2663,17 +1757,17 @@ class IronLeo78_MTV:
         if kwargs.get("Use Video", True) or kwargs.get("Next Segment On Run", False):
             return float("nan")  # segment stepping (video or custom audio chunks): always re-run
         m = hashlib.sha256()
+        kwargs = dict(kwargs)
+        m.update(b"segment:" + str(_load_index(_counter_key(kwargs))).encode("utf-8"))      # v0.2.3: a Go to another segment re-runs an OFF node
+        _spread_pictures(kwargs)                               # v0.1.19: the one Pictures wire counts like the nine
         for i in range(1, cls.SLOTS + 1):
-            name = kwargs.get(f"picture_{i}", NONE_CHOICE)
-            m.update(name.encode("utf-8"))
-            if name != NONE_CHOICE:
-                try:
-                    with open(folder_paths.get_annotated_filepath(name), "rb") as f:
-                        m.update(f.read())
-                except Exception:
-                    pass
-        for key in ("megapixels", "duration", "Custom Audio File", "Audio Stem", "Video File"):
+            if kwargs.get(_picture_input(i)) is not None:      # linked image: its content is in ComfyUI's own cache key
+                m.update(b"linked:" + str(i).encode("utf-8"))
+        for key in ("megapixels", "duration", "Audio Stem"):
             m.update(str(kwargs.get(key, "")).encode("utf-8"))
+        for key in ("Custom Audio File", "Video File"):      # v0.0.9p: name + mtime + size, so a file replaced under the same name is noticed
+            m.update(repr(_file_id(kwargs.get(key))).encode("utf-8"))
+        m.update(repr(_defaults_stamp()).encode("utf-8"))      # v0.0.9w: "Set New Defaults" / Factory re-run the node
         return m.digest().hex()
 
     @classmethod
@@ -2688,16 +1782,12 @@ class IronLeo78_MTV:
         custom_audio = kw.get("Custom Audio File")
         if custom_audio and custom_audio != NONE_CHOICE and not folder_paths.exists_annotated_filepath(custom_audio):
             return f"Custom audio file not found: {custom_audio}"
-        if kw.get("Audio Stem", _stems.STEM_SONG) not in _stems.STEM_CHOICES:
+        if kw.get("Audio Stem", _stems.STEM_FULL) not in _stems.STEM_CHOICES + (_stems.STEM_LEGACY_SONG,):
             return f"Audio Stem must be one of: {', '.join(_stems.STEM_CHOICES)}."
-        for i in range(1, cls.SLOTS + 1):
-            name = kw.get(f"picture_{i}", NONE_CHOICE)
-            if name != NONE_CHOICE and not folder_paths.exists_annotated_filepath(name):
-                return f"Picture{i}: invalid image file: {name}"
         return True
 
 
 _register_routes()
 
 NODE_CLASS_MAPPINGS = {"IronLeo78_MTV": IronLeo78_MTV}
-NODE_DISPLAY_NAME_MAPPINGS = {"IronLeo78_MTV": "IronLeo78 MTV (v0.0.2)"}
+NODE_DISPLAY_NAME_MAPPINGS = {"IronLeo78_MTV": "IronLeo78 MTV (v0.4.8)"}

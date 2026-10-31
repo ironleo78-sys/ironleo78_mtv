@@ -14,7 +14,7 @@ The cache folder is named after the song; what is inside is only reused when it 
 CONTENT (SHA-1), the model and the separation settings, so:
   * re-uploading or touching the same song (same name, same content) does not trigger a new separation,
   * an edited / different song under the same name, or changed settings, does.
-Nothing here runs unless a stem (not "Song") is selected, and this module imports no torch / torchaudio /
+Nothing here runs unless a stem (not "Full") is selected, and this module imports no torch / torchaudio /
 comfy at import time (they are imported inside separate_audio only).
 
 Credit: https://pytorch.org/audio/stable/tutorials/hybrid_demucs_tutorial.html
@@ -36,9 +36,10 @@ import numpy as np
 
 log = logging.getLogger("IronLeo78.MTV.stems")
 
-STEM_SONG = "Song"                                              # the original audio, no separation
+STEM_FULL = "Full"                                              # the original audio, no separation (called "Song" until v0.0.6)
+STEM_LEGACY_SONG = "Song"                                       # the old name: still accepted, means Full
 STEM_LABELS = ("Vocals", "Guitars", "Drums", "Bass")            # the four stems, in the order shown on the node
-STEM_CHOICES = (STEM_SONG,) + STEM_LABELS
+STEM_CHOICES = (STEM_FULL,) + STEM_LABELS
 DEMUCS_KEY = {"Vocals": "vocals", "Guitars": "other", "Drums": "drums", "Bass": "bass"}   # label -> Demucs source
 
 MODEL_NAME = "HDEMUCS_HIGH_MUSDB_PLUS"
@@ -89,6 +90,24 @@ def file_sha1(path):
 
 def _settings():
     return {"fade": CHUNK_FADE_SHAPE, "chunk_length": CHUNK_LENGTH, "chunk_overlap": CHUNK_OVERLAP}
+
+
+def cache_name(output_dir, song, source_sha1, source_name):
+    """v0.1.9: the name the stems of this song are kept under. Normally the cleaned song name. But two DIFFERENT song files
+    can clean to the same name ("My Song!.wav" and "My Song?.mp3", or "song.wav" and "song.mp3"): until 0.1.9 they kept
+    replacing each other's stems (each one ran Demucs again). When the folder already holds the stems of ANOTHER file
+    (another content and another file name), this song uses "<song>_<first 8 characters of its SHA-1>" instead.
+    The same file edited (same name, new content) still replaces its own stems, as before."""
+    try:
+        with open(meta_file(output_dir, song), encoding="utf-8") as f:
+            meta = json.load(f)
+    except (OSError, ValueError):
+        return song
+    if not isinstance(meta, dict):
+        return song
+    other_content = meta.get("source_sha1") not in (None, source_sha1)
+    other_file = meta.get("source_name") not in (None, source_name)
+    return f"{song}_{source_sha1[:8]}" if other_content and other_file else song
 
 
 def read_cache(output_dir, song, source_sha1):
@@ -256,6 +275,7 @@ def ensure_stems(source_path, song, output_dir, get_audio, progress=None, separa
     """
     sha = file_sha1(source_path)
     with _LOCK:
+        song = cache_name(output_dir, song, sha, os.path.basename(source_path))      # v0.1.9
         paths = read_cache(output_dir, song, sha)
         folder = stem_folder(output_dir, song)
         if paths:

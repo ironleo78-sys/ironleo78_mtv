@@ -1,12 +1,12 @@
 [project]
 name = "ironleo78-mtv"
-description = "Music-video clips synced to your own audio (MiniMax H3): the MTV node, the MTV Model Loader and the 2in1 Revitalizer upscaler."
-version = "0.0.2"
+description = "Music-video clips synced to your own audio (MiniMax H3): the MTV node, the MTV Model Loader, the 2in1 Revitalizer upscaler and the IronLeo78-MTV-Prompt-Generator (pictures + video + prompt in, MTV prompt out)."
+version = "0.4.8"
 license = { file = "LICENSE" }
 dependencies = []
 
 [project.urls]
-Repository = "https://github.com/ironleo78-sys/ironleo78_mtv"
+Repository = "https://github.com/ironleo78-sys/IronLeo78_MTV"
 
 [tool.comfy]
 PublisherId = "ironleo78"

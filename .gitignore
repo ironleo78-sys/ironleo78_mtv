@@ -2,4 +2,9 @@ __pycache__/
 *.pyc
 # files the node writes into its own folder while it runs
 mtv_state.json
+mtv_state.json.tmp
 mtv_last_frame.png
+mtv_defaults.json
+
+# personal preset (a family description): stays on this machine, never published
+presets/12 - IronLeo78 Mode.md
