@@ -413,9 +413,11 @@ def defaults(installed):
     return {k: v[1].get("default") for k, v in r.items() if len(v) > 1 and isinstance(v[1], dict)}
 d = defaults(True)
 check(d["megapixels"] == 0.2 and d["duration"] == 5.0, "defaults: megapixels 0.2, duration 5 s")
-check(d["Turbo"] is True and d["Guide"] is True, "defaults: Turbo and Guide are ON")
-check(d["Save Latent"] is True and mod.DEFAULT_SAVE_LATENT is True and mod.SAVE_LATENT_MISSING is False,
-      "v0.1.11 defaults: Save Latent is ON on a new node (a prompt without the value still saves nothing)")
+check(d["Turbo"] is True and d["Guide"] is False, "defaults: Turbo ON, Guide OFF (v0.6.2)")
+t0 = mod.IronLeo78_MTV.INPUT_TYPES()["required"]["Guide"][1]
+check(t0.get("label_on") == "ON" and t0.get("label_off") == "OFF", "v0.6.2: the Guide toggle keeps its ON / OFF labels")
+check(d["Save Latent"] is False and mod.DEFAULT_SAVE_LATENT is False and mod.SAVE_LATENT_MISSING is False,
+      "v0.6.2 defaults: Save Latent is OFF on a new node (and a prompt without the value saves nothing, as before)")
 check(d["Choose Audio latent"] == "Custom Audio" and d["Audio Stem"] == "Full" and d["prompt"] == "",
       "defaults: Custom Audio, Full, empty prompt (the user's 20261030-1007pm set)")
 check(not any(k in d for k in ("custom_lora_enabled", "Custom_LoRa", "Custom_LoRa_STR", "lora_1_enabled", "LoRa_1")), "v2.8.6: no custom LoRA widgets on the MTV")
@@ -673,7 +675,7 @@ fp.get_filename_list = lambda k: {"diffusion_models": ["d1.safetensors"], "loras
 # 12 ---- segment count (v2.5)
 print("12. segment count")
 real_probe = mod._probe_seconds
-mod._probe_seconds = lambda name, kind: {"video": 100.0, "audio": 100.0, "short": 60.0}.get(
+mod._probe_seconds = lambda name, kind: {"video": 100.0, "soundtrack": 100.0, "audio": 100.0, "short": 60.0}.get(      # v0.4.12: + soundtrack
     "short" if name == "short.wav" else kind)
 base = {"Use Video": True, "Video File": "v.mp4", "Custom Audio File": "None",
         "Choose Audio latent": False, "duration": 5.0}
@@ -777,7 +779,7 @@ check(d["kind"] == "clip" and "upscaled_file" not in d and "latent_upscale" not 
 check(len(ROWS[0]["prompt"]) == mod.MANIFEST_PROMPT_CHARS and ROWS[0]["prompt"].endswith("\u2026"), "the CSV prompt stays short, marked with an ellipsis")
 check(ROWS[0]["prompt_json"] == r["result"][1] + ".json" and ROWS[0]["file"] == r["result"][1] + ".mp4", "manifest row points at the sidecar and the planned clip name")
 check("manifest:" in status_of(r) and ("full prompt: " + r["result"][1] + ".json") in status_of(r), "status lists the sidecar of the clip")
-check(mod.VERSION == "0.4.8", "VERSION is 0.4.8")
+check(mod.VERSION == "0.6.3", "VERSION is 0.6.3")
 check(Cls.INPUT_TYPES()["required"]["duration"][1]["step"] == 0.1 and Cls.INPUT_TYPES()["required"]["duration"][1]["default"] == 5.0, "v0.0.9: duration moves by 0.1 s, default still 5")
 
 # 15 ---- manifest upgrade (v2.5)
@@ -1108,8 +1110,8 @@ mod._write_latent_file = _fake_write_latent
 # 21 ---- v0.6: the Save Latent toggle
 print("21. Save Latent OFF / ON")
 t21 = mod.IronLeo78_MTV.INPUT_TYPES()["required"]
-check(t21["Save Latent"][0] == "BOOLEAN" and t21["Save Latent"][1]["default"] is True
-      and t21["Save Latent"][1]["label_on"] == "ON" and t21["Save Latent"][1]["label_off"] == "OFF", "Save Latent is an OFF / ON toggle, default ON (v0.1.11)")
+check(t21["Save Latent"][0] == "BOOLEAN" and t21["Save Latent"][1]["default"] is False
+      and t21["Save Latent"][1]["label_on"] == "ON" and t21["Save Latent"][1]["label_off"] == "OFF", "Save Latent is an OFF / ON toggle, default OFF (v0.6.2; ON from 0.1.11 to 0.6.1)")
 tip = t21["Save Latent"][1]["tooltip"]
 check(".latent" in tip and ".conditioning" in tip, "its tooltip names the files it writes")
 # ON: the files exist and the clip number matches; OFF: nothing; the toggle is the ONLY thing that decides
@@ -1721,7 +1723,7 @@ try:
     check(mod._load_index(A) == 5 and mod._load_furthest(A) == 7, "after the update, a song with no counter of its own still shows the old one (nobody loses their place)")
     mod._save_index(6, A)
     st = read38()
-    check(st["songs"][A] == {"index": 6, "furthest": 7, "guide_frame_for": 4} and st.get("adopted") is True,
+    check(st["songs"][A] == {"index": 6, "furthest": 7, "guide_frame_for": 4, "file": None} and st.get("adopted") is True,      # v0.4.13: + the file mark (no file here)
           "the first song that runs takes the old counter over (6, furthest 7, guide marker kept)")
     check(st["index"] == 5 and mod._load_index("") == 5, "the shared counter itself is untouched")
     check(mod._load_index(B) == 0 and mod._load_furthest(B) == 0, "a second song starts at segment 1 (the old counter was handed on once)")
@@ -1906,4 +1908,196 @@ finally:
         sys.modules.pop("server", None)
     else:
         sys.modules["server"] = _old_srv
+# ---- 44: v0.4.9 an update / reinstall starts the counters again
+_saved44 = (smod.STATE_FILE, smod.DATA_DIR)
+smod.DATA_DIR = os.path.join(TMP, "d44")
+os.makedirs(smod.DATA_DIR, exist_ok=True)
+smod.STATE_FILE = os.path.join(smod.DATA_DIR, "mtv_state.json")
+try:
+    open(smod.STATE_FILE, "w").write(_json.dumps({"index": 5, "furthest": 9, "songs": {"video:a.mp4": {"index": 4}}}))
+    open(os.path.join(smod.DATA_DIR, "mtv_last_frame_abc.png"), "wb").write(b"x")
+    check(smod._reset_on_new_version("9.9.9") is True, "an older file (no version) is reset")
+    check(_json.load(open(smod.STATE_FILE)) == {"index": 0, "version": "9.9.9"}, "counters back to 0, version recorded")
+    check(not os.path.exists(os.path.join(smod.DATA_DIR, "mtv_last_frame_abc.png")), "the saved last frames are removed")
+    smod._save_index(3, "video:a.mp4")
+    check(smod._reset_on_new_version("9.9.9") is False and smod._load_index("video:a.mp4") == 3, "same version: counters untouched")
+    check(smod._reset_on_new_version("9.9.10") is False and smod._load_index("video:a.mp4") == 3, "v0.4.13 (O1): next version: a counter that knows its file is KEPT")
+    check(_json.load(open(smod.STATE_FILE))["version"] == "9.9.10", "v0.4.13 (O1): the new version is still recorded")
+finally:
+    smod.STATE_FILE, smod.DATA_DIR = _saved44
+
+# 45 ---- v0.4.12: the fixes of the 0.4.11 sweep (B1, B5, B6, B7, B8)
+print("45. v0.4.12: sweep fixes")
+cmod = importlib.import_module(PKG + ".consts")
+# B1: os.replace is retried on a Windows "Access denied"
+_real_replace = os.replace
+_tries45 = []
+def _flaky_replace(src, dst, fails=2):
+    _tries45.append(src)
+    if len(_tries45) <= fails:
+        raise PermissionError(13, "Access is denied")
+    return _real_replace(src, dst)
+_a45 = os.path.join(TMP, "a45.tmp")
+_b45 = os.path.join(TMP, "b45.json")
+open(_a45, "w").write("{}")
+os.replace = _flaky_replace
+try:
+    cmod._replace_retry(_a45, _b45, tries=5, pause=0)
+finally:
+    os.replace = _real_replace
+check(len(_tries45) == 3 and os.path.exists(_b45) and not os.path.exists(_a45), "B1: two 'Access denied' then the replace goes through")
+open(_a45, "w").write("{}")
+os.replace = lambda src, dst: (_ for _ in ()).throw(PermissionError(13, "Access is denied"))
+try:
+    try:
+        cmod._replace_retry(_a45, _b45, tries=3, pause=0)
+        _raised45 = False
+    except PermissionError:
+        _raised45 = True
+finally:
+    os.replace = _real_replace
+check(_raised45, "B1: still denied after every try: the error is raised (the caller decides)")
+# B1: a counter that cannot be saved no longer loses the finished clip
+_saved45 = mod._save_index
+def _deny_save(i, key=""):
+    raise PermissionError(13, "Access is denied")
+mod._save_index = _deny_save
+try:
+    r45 = run()
+finally:
+    mod._save_index = _saved45
+check(r45["result"][0] is not None, "B1: the clip still leaves on the video output when the counter save fails")
+check("segment counter could not be saved" in status_of(r45) and "makes segment 1 AGAIN" in status_of(r45)
+      and "segment 2" in status_of(r45), "B1: the status says the counter did not move and how to go on")
+# B5: the free route also waits for a running Revitalizer / Prompt Generator (model_cache.busy)
+_freed45 = []
+_saved45b = mod.free_cached_models
+mod.free_cached_models = lambda reason="": _freed45.append(reason)
+try:
+    with mod._models.busy():
+        check(call("POST", mod.FREE_ROUTE) == {"ok": False, "busy": True} and not _freed45, "B5: free refused while another pack node runs")
+    check(not mod._models.is_busy(), "B5: the busy count is back to 0 after the block")
+    check(call("POST", mod.FREE_ROUTE) == {"ok": True} and _freed45 == ["node removed"], "B5: free works again when nothing runs")
+finally:
+    mod.free_cached_models = _saved45b
+# B7 + B6: the last frame is written through a .tmp; an unreadable one, or no project name, never fails the Run
+_saved45c = (smod.STATE_FILE, smod.LAST_FRAME_FILE, smod._clip_from_manifest)
+smod.STATE_FILE = os.path.join(TMP, "state45.json")
+smod.LAST_FRAME_FILE = os.path.join(TMP, "lf45.png")
+_reads45 = []
+smod._clip_from_manifest = lambda song, seg: _reads45.append((song, seg)) or None
+try:
+    class _Arr45:
+        def numpy(self):
+            return _np.zeros((4, 4, 3), _np.float32)
+    class _Frame45:
+        def __getitem__(self, i):
+            return _Arr45()
+    REAL_SAVE_LAST_FRAME(_Frame45(), 2, "")
+    check(os.path.exists(smod.LAST_FRAME_FILE) and not os.path.exists(smod.LAST_FRAME_FILE + ".tmp"), "B7: the PNG is in place, no .tmp left behind")
+    open(smod.LAST_FRAME_FILE, "wb").write(b"\x89PNG\r\n broken")
+    img45, why45 = smod._load_last_frame(3, "Song", "")
+    check(img45 is None and _reads45 == [("Song", 2)], "B7: a broken saved frame falls through to the read-back instead of failing")
+    _reads45.clear()
+    img45, why45 = smod._load_last_frame(3, "", "")
+    check(img45 is None and _reads45 == [], "B6: no project name (pictures only): no read-back from another project's clip")
+finally:
+    smod.STATE_FILE, smod.LAST_FRAME_FILE, smod._clip_from_manifest = _saved45c
+# B8: a video's length is its picture stream's own length; the soundtrack source uses the audio stream's
+class _S45:
+    def __init__(self, seconds):
+        self.duration, self.time_base = int(seconds * 1000), 0.001
+class _C45:
+    duration = 10_000_000          # the container: the longest stream, 10 s
+    class streams:
+        video = [_S45(7.0)]
+        audio = [_S45(10.0)]
+    def close(self):
+        pass
+_saved45d = (mod._open_media, mod._file_id)
+mod._open_media = lambda path: _C45()
+mod._file_id = lambda name: (name, None, None)      # no mtime: never cached
+try:
+    check(abs(real_probe("v45.mp4", "video") - 7.0) < 1e-6, "B8: video = the picture stream (7 s), not the container (10 s)")
+    check(abs(real_probe("v45.mp4", "soundtrack") - 10.0) < 1e-6, "B8: soundtrack = the audio stream (10 s)")
+    check(abs(real_probe("a45.wav", "audio") - 10.0) < 1e-6, "B8: a custom audio file keeps the container length")
+    _S45b = _C45.streams.video
+    _C45.streams.video = [type("N", (), {"duration": None, "time_base": 1})()]
+    check(abs(real_probe("v45.mp4", "video") - 10.0) < 1e-6, "B8: no stream length stated: the container length, as before")
+    _C45.streams.video = _S45b
+finally:
+    mod._open_media, mod._file_id = _saved45d
+
+# 46 ---- v0.4.13: optimisations of the 0.4.11 sweep (O1 counters keep their place across updates, O2 one shared VAE copy)
+print("46. v0.4.13: optimisations")
+_saved46 = (smod.STATE_FILE, smod.DATA_DIR, fp.get_annotated_filepath)
+smod.DATA_DIR = os.path.join(TMP, "d46")
+os.makedirs(smod.DATA_DIR, exist_ok=True)
+smod.STATE_FILE = os.path.join(smod.DATA_DIR, "mtv_state.json")
+_vid46 = os.path.join(TMP, "clip46.mp4")
+open(_vid46, "wb").write(b"x" * 100)
+fp.get_annotated_filepath = lambda name: _vid46 if name == "clip46.mp4" else os.path.join(TMP, "missing", name)
+try:
+    smod._save_index(4, "video:clip46.mp4")
+    st46 = _json.load(open(smod.STATE_FILE))["songs"]["video:clip46.mp4"]
+    check(st46["index"] == 4 and st46["file"] == [100, os.stat(_vid46).st_mtime_ns], "O1: a counter stores its file's size and date")
+    check(smod._load_index("video:clip46.mp4") == 4, "O1: same file: the counter is used")
+    open(_vid46, "wb").write(b"y" * 250)      # another video copied over the old one, same name
+    check(smod._load_index("video:clip46.mp4") == 0, "O1: another file under the same name starts from segment 1")
+    smod._save_index(2, "video:clip46.mp4")
+    check(smod._load_index("video:clip46.mp4") == 2, "O1: and its new counter is kept from then on")
+    _old46 = {"version": "0.4.12", "index": 0, "songs": {"audio:old.wav": {"index": 7}}}      # written by 0.4.12: no file marks
+    open(smod.STATE_FILE, "w").write(_json.dumps(_old46))
+    check(smod._reset_on_new_version("0.4.13") is True and smod._load_index("audio:old.wav") == 0, "O1: counters from before 0.4.13 (no file mark) are reset once, as in 0.4.9")
+    smod._save_index(5, "audio:old.wav")
+    check(smod._reset_on_new_version("0.4.14") is False and smod._load_index("audio:old.wav") == 5, "O1: from then on an update keeps them")
+finally:
+    smod.STATE_FILE, smod.DATA_DIR, fp.get_annotated_filepath = _saved46
+# O2: the MTV and the Revitalizer share one loaded copy of each VAE
+mc = mod._models
+mc._VAE.clear()
+_loads46 = []
+def _loader46(tag):
+    return lambda: _loads46.append(tag) or ("VAE", tag, len(_loads46))
+_v1 = mc.vae("video.safetensors", _loader46("mtv"))
+_v2 = mc.vae("video.safetensors", _loader46("rev"))
+check(_v1 is _v2 and _loads46 == ["mtv"], "O2: the second node gets the SAME loaded VAE (loaded once)")
+mc.vae("audio.safetensors", _loader46("a"))
+mc.vae("third.safetensors", _loader46("t"))
+check(len(mc._VAE) == 2 and ("video.safetensors", None) not in mc._VAE, "O2: at most two VAEs are held (the least recently used goes)")
+mc.free()
+check(not mc._VAE, "O2: free() drops the shared VAEs too (the MTV's free_cached_models)")
+# 47 ---- v0.4.14: Go / Reset do their file work in a worker thread (sweep N1)
+print("47. v0.4.14: jump / reset off the web server's thread")
+import threading as _th47
+_main47 = _th47.get_ident()
+_where47 = []
+_saved47 = (mod._handle_jump, mod._reset_state, mod._RUNNING)
+mod._RUNNING = 0
+mod._handle_jump = lambda body: _where47.append(("jump", _th47.get_ident())) or {"ok": True}
+mod._reset_state = lambda key="": _where47.append(("reset", _th47.get_ident()))
+try:
+    check(call("POST", mod.JUMP_ROUTE, _Req({"segment": 2})) == {"ok": True}, "N1: jump still answers")
+    check(call("POST", mod.RESET_ROUTE, _Req({}))["ok"] is True, "N1: reset still answers")
+    check([k for k, _ in _where47] == ["jump", "reset"] and all(t != _main47 for _, t in _where47),
+          "N1: both ran in a worker thread, not on the server's own thread")
+finally:
+    mod._handle_jump, mod._reset_state, mod._RUNNING = _saved47
+# 48 ---- v0.4.16: the status line's total frames = the picture stream's length (sweep N5)
+print("48. v0.4.16: status total frames")
+class _Img48:
+    shape = (24, 64, 64, 3)
+_saved48 = (mod._decode_video, mod._decode_audio, mod._probe_seconds, mod._resolve_video_path)
+mod._resolve_video_path = lambda v: "/x/" + str(v)
+mod._decode_video = lambda path, fps, skip, frames, shape=None: (_Img48(), {"rate": 24.0, "duration": 10.0, "quarter_turns": 0})
+mod._decode_audio = lambda *a, **k: None
+mod._probe_seconds = lambda name, kind: 7.0 if kind == "video" else None
+try:
+    _st48 = mod.IronLeo78_MTV()._load_video({"Video File": "v48.mp4", "Next Segment On Run": True}, 124, 5.0, 0.2, 0)[5]
+    check("total frames: 168" in _st48, "N5: 7 s picture stream at 24 fps = 168 frames, not the container's 240 (%s)" % _st48.split("|")[-1].strip()[:40])
+    mod._probe_seconds = lambda name, kind: None
+    _st48 = mod.IronLeo78_MTV()._load_video({"Video File": "v48.mp4", "Next Segment On Run": True}, 124, 5.0, 0.2, 0)[5]
+    check("total frames: 240" in _st48, "N5: no stream length known: the container length, as before")
+finally:
+    mod._decode_video, mod._decode_audio, mod._probe_seconds, mod._resolve_video_path = _saved48
 print("\nALL %d CHECKS PASSED" % ok)

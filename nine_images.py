@@ -188,9 +188,9 @@ PRESET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "presets")
 
 
 def _preset_sort_key(name):
-    """v0.3.0: "10 - x" comes after "9 - x" (the leading number is compared as a number)."""
-    head = name.split(" ", 1)[0]
-    return (int(head) if head.isdigit() else 10 ** 6, name.lower())
+    """v0.3.0: "10 - x" comes after "9 - x" (the leading number is compared as a number). v0.4.11: "6b - x" comes right after "6 - x"."""
+    m = re.match(r"(\d+)([a-z]?)(?=\s|$)", name.split(" ", 1)[0].lower())
+    return (int(m.group(1)), m.group(2), name.lower()) if m else (10 ** 6, "", name.lower())
 
 
 def _preset_names():
@@ -202,6 +202,63 @@ def _preset_names():
 
 def _preset_path(name):
     return os.path.join(PRESET_DIR, name + ".md")
+
+
+# v0.5.0: the presets are named "Category - Name" (sorted alphabetically, grouped by category). A workflow or API prompt saved before
+# 0.5.0 holds the OLD numbered name: it is translated here (and in the web UI, see il78_sync_logic.presetAlias), so old workflows load.
+PRESET_ALIASES = {
+    "1 - Replace main actor": "Swap - Main actor",
+    "2 - Replace main actor and environment": "Swap - Main actor and environment",
+    "3 - Replace two actors and environment": "Swap - Two actors and environment",
+    "4 - Replace environment only": "Swap - Environment only",
+    "5 - Restyle video": "Look - Restyle from a picture",
+    "6 - Outfit swap": "Swap - Outfit",
+    "6b - Outfit and Pose Swap": "Swap - Outfit and pose",
+    "7 - Singer performance": "Musician - Singer",
+    "8 - Drummer performance": "Musician - Drummer",
+    "9 - Bassist performance": "Musician - Bassist",
+    "10 - Guitarist performance": "Musician - Guitarist",
+    "11 - Time of day or weather": "Weather - Any time of day or weather",
+    "12 - IronLeo78 Mode": "Personal - IronLeo78 Mode",
+    "13 - Camera retake": "Camera - Retake with a new move",
+    "14 - Acting retake": "Performance - Acting retake",
+    "15 - Film look and era": "Look - Film look and era",
+    "16 - Storyboard shots": "Camera - Storyboard shots",
+    "17 - Continue the scene": "Story - Continue the scene",
+    "18 - First and last frame": "Camera - First and last frame",
+    "19 - Prop swap": "Swap - Prop",
+    "20 - Add a character": "Cast - Add a character",
+    "21 - Motion transfer": "Performance - Motion transfer",
+    "22 - Concert stage": "Stage - Concert",
+    "23 - Visual effects": "FX - Visual effects",
+    "24 - Clone performer": "Cast - Clone the performer",
+}
+
+
+def resolve_preset(name):
+    """v0.5.0: the preset file to use for `name`: the name itself when its file exists, else its new name (an old numbered name), else
+    its old name (a user who still has the old file, e.g. the personal preset not renamed yet). Unknown names come back unchanged."""
+    if not name or name == PRESET_NONE or os.path.isfile(_preset_path(name)):
+        return name
+    new = PRESET_ALIASES.get(name)
+    if new and os.path.isfile(_preset_path(new)):
+        return new
+    for old, newer in PRESET_ALIASES.items():
+        if newer == name and os.path.isfile(_preset_path(old)):
+            return old
+    return name
+
+
+def effective_aliases():
+    """v0.6.0 (sweep M1): the aliases the web UI may apply: only those whose NEW file exists and whose OLD file does not. A user who still
+    has an old file (the personal preset not renamed yet) keeps seeing and using it under its old name."""
+    return {old: new for old, new in PRESET_ALIASES.items()
+            if os.path.isfile(_preset_path(new)) and not os.path.isfile(_preset_path(old))}
+
+
+def preset_choice_ok(name):
+    """v0.5.0: True for "None", a preset on disk, or an old / new name that resolve_preset turns into one."""
+    return not name or name == PRESET_NONE or os.path.isfile(_preset_path(resolve_preset(name)))
 
 
 def _parse_preset_full(text):
@@ -259,6 +316,7 @@ def preset_prompts(mode="v2v"):
 def _read_preset(name, mode="v2v"):
     if not name or name == PRESET_NONE:
         return "", ""
+    name = resolve_preset(name)      # v0.5.0: old numbered names still work
     path = _preset_path(name)
     if not os.path.isfile(path):
         raise FileNotFoundError(f"Preset file not found: presets/{name}.md")
@@ -367,7 +425,7 @@ class IronLeo78_9ImagesToBatchToLLM:
                                           "tooltip": "Length of the video window, 1-20 seconds."})
         required["Frame_Interval"] = (INTERVALS, {"default": "12",      # v0.1.11: the user's tuned defaults (was "2")
                                                   "tooltip": "Keep every Nth frame (of 24 fps) for the LLM."})
-        required["Video_Size"] = (VIDEO_SIZES, {"default": "672x384"})
+        required["Video_Size"] = (VIDEO_SIZES, {"default": "512x288"})      # v0.6.1: the user's default (was 672x384)
         # v0.1.15: appended LAST (a saved workflow without it simply gets the default)
         required["Preset"] = ([PRESET_NONE] + _preset_names(), {"default": PRESET_NONE,
                               "tooltip": "Scenario preset for the LLM prompt generator (files in the pack's presets/ folder). "
@@ -395,7 +453,7 @@ class IronLeo78_9ImagesToBatchToLLM:
             m.update(f"{k}={kw[k]}|".encode())
         # v0.0.2e: every file (pictures too) is identified by name + size + mtime, never read: a picture replaced under the
         # same name still changes its size or mtime, and a queue no longer reads up to nine full pictures from disk
-        p = kw.get("Preset")
+        p = resolve_preset(kw.get("Preset"))      # v0.5.0: an old numbered name hashes its renamed file
         if p and p != PRESET_NONE and os.path.isfile(_preset_path(p)):      # v0.1.15: an edited preset file re-runs the node
             st = os.stat(_preset_path(p))
             m.update(f"|preset:{st.st_size}:{st.st_mtime_ns}".encode())
@@ -406,6 +464,14 @@ class IronLeo78_9ImagesToBatchToLLM:
                 st = os.stat(folder_paths.get_annotated_filepath(v))
                 m.update(f"{st.st_size}:{st.st_mtime_ns}".encode())
         return m.hexdigest()
+
+    @classmethod
+    def VALIDATE_INPUTS(cls, Preset=None):
+        """v0.5.0: the Preset combo is checked here instead of by ComfyUI, so a workflow saved with an old numbered preset name (renamed in
+        0.5.0) still runs: resolve_preset translates it. Only this input skips the built-in combo check."""
+        if Preset is None or preset_choice_ok(Preset):
+            return True
+        return f"Preset not found: {Preset} (no file presets/{Preset}.md)"
 
     def run(self, Start_From, Duration, Frame_Interval, Video_Size, Preset=PRESET_NONE, Mode="v2v", **kw):
         # ---- pictures

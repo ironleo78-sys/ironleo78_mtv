@@ -1,9 +1,9 @@
 """
-IronLeo78 MTV  v0.4.8  (pre-alpha)  -  a ComfyUI node pack
+IronLeo78 MTV  v0.6.3  (pre-alpha)  -  a ComfyUI node pack
 
 Install: put this whole folder (ironleo78_mtv) into ComfyUI/custom_nodes/ and restart ComfyUI.
 Hard-refresh the browser (Ctrl+F5). Nodes appear under  IronLeo78 > MTV :
-    IronLeo78 MTV (v0.4.8)               makes a music-video clip per Run, synced to your own audio
+    IronLeo78 MTV (v0.6.3)                makes a music-video clip per Run, synced to your own audio
     IronLeo78 MTV Model Loader            optional: models, LoRAs, steps and seed for the MTV node
     IronLeo78 2in1 Revitalizer            upscales + refines a clip saved by the MTV (Save Latent = ON)
     IronLeo78-MTV-Prompt-Generator        9 pictures + 1 video + your prompt: writes the MTV prompt with a vision LLM and sends the
@@ -15,7 +15,7 @@ The Revitalizer can use the third-party Comfyui_Minimax_h3_latent_Upscaler node 
 without it the Revitalizer resizes the latent itself; see README.md).
 """
 
-__version__ = "0.4.8"
+__version__ = "0.6.3"
 
 from .mtv import NODE_CLASS_MAPPINGS as _MTV_NODES
 from .mtv import NODE_DISPLAY_NAME_MAPPINGS as _MTV_NAMES

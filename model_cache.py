@@ -77,11 +77,56 @@ def diffusion_model(name, weight_dtype="default"):
     return model, False
 
 
+_BUSY = [0]          # v0.4.12 (sweep B5): how many pack nodes are running right now (MTV, Revitalizer, Prompt Generator)
+
+
+class busy:
+    """v0.4.12 (sweep B5): `with busy():` around a node's run. While any pack node runs, the MTV's "free" route (called when
+    the last MTV node is deleted) refuses to unload models, so a running Revitalizer / Prompt Generator keeps them."""
+
+    def __enter__(self):
+        _BUSY[0] += 1
+        return self
+
+    def __exit__(self, *exc):
+        _BUSY[0] = max(0, _BUSY[0] - 1)
+        return False
+
+
+def is_busy():
+    return _BUSY[0] > 0
+
+
 def held():
     """How many base models are kept (0 or 1)."""
     return len(_BASE)
 
 
+_VAE = {}            # v0.4.13 (sweep O2): (vae file name, mtime) -> the loaded VAE, shared by the MTV and the Revitalizer
+VAE_MAX = 2          # the video VAE + the audio VAE
+
+
+def vae(name, load):
+    """v0.4.13 (sweep O2): ONE loaded copy of a VAE file for the whole pack. `load()` loads it when it is not held yet. Until
+    0.4.12 the MTV and the Revitalizer each kept their own copy of the video and the audio VAE (two of each in RAM)."""
+    try:
+        mtime = os.path.getmtime(folder_paths.get_full_path("vae", name))
+    except Exception:
+        mtime = None
+    key = (str(name), mtime)
+    if key in _VAE:
+        _VAE[key] = _VAE.pop(key)          # most recently used goes last
+        return _VAE[key]
+    for k in [k for k in _VAE if k[0] == str(name)]:      # the same file changed on disk: the old copy goes
+        del _VAE[k]
+    while len(_VAE) >= VAE_MAX:
+        del _VAE[next(iter(_VAE))]
+    value = load()
+    _VAE[key] = value
+    return value
+
+
 def free():
-    """Drop the shared base model (called by the MTV's free_cached_models)."""
+    """Drop the shared base model and VAEs (called by the MTV's free_cached_models)."""
     _BASE.clear()
+    _VAE.clear()

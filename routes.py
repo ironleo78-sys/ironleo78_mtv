@@ -19,7 +19,8 @@ def register(m):
 
         @routes.post(m.FREE_ROUTE)
         async def _free_route(request):
-            if m._RUNNING > 0:
+            # v0.4.12 (sweep B5): also refused while a Revitalizer or Prompt Generator runs (model_cache.busy), not only an MTV
+            if m._RUNNING > 0 or m._models.is_busy():
                 return web.json_response({"ok": False, "busy": True})
             m.free_cached_models("node removed")
             return web.json_response({"ok": True})
@@ -45,7 +46,8 @@ def register(m):
             except Exception:
                 body = {}
             key = m._counter_key(body.get("params") if isinstance(body, dict) else None)
-            m._reset_state(key)
+            import asyncio      # v0.4.14 (sweep N1): the file work runs in a worker thread, never on the web server's own thread
+            await asyncio.get_running_loop().run_in_executor(None, m._reset_state, key)
             log.info("segment counter of %s reset to 0", m._counter_label(key))
             return web.json_response({"ok": True, "index": 0})
 
@@ -57,7 +59,8 @@ def register(m):
                 body = await request.json()
             except Exception:
                 body = {}
-            return web.json_response(m._handle_jump(body))
+            import asyncio      # v0.4.14 (sweep N1): in a worker thread, like the segments route
+            return web.json_response(await asyncio.get_running_loop().run_in_executor(None, m._handle_jump, body))
 
         @routes.get(m.LOADER_DEFAULTS_ROUTE)
         async def _loader_defaults_route(request):

@@ -111,13 +111,34 @@ def _upload_root():
     return os.path.abspath(os.path.join(folder_paths.get_input_directory(), UPLOAD_SUBFOLDER))
 
 
+ENTRIES_TTL = 2.0            # v0.4.15 (sweep P1o): seconds one folder listing is reused
+_ENTRIES = {}                # (output root, upload root) -> (time, {suffix: [entries]})
+
+
 def entries(suffix):
-    """Everything the dropdowns offer: files in output/ (newest first) and uploaded files (tagged)."""
-    found = scan(_root(), suffix)
-    up = _upload_root()
-    if os.path.isdir(up):
-        found += [UPLOAD_TAG + n for n in scan(up, suffix, max_depth=1)]
-    return found
+    """Everything the dropdowns offer: files in output/ (newest first) and uploaded files (tagged).
+    v0.4.15 (sweep P1o): ONE walk lists the latents and the conditionings together, and the result is reused for ENTRIES_TTL
+    seconds. Until 0.4.14 every /object_info (page load, the R button, the node's list refresh) walked the whole output folder
+    twice. An upload clears the reuse at once (forget_entries)."""
+    root, up = _root(), _upload_root()
+    key = (root, up)
+    hit = _ENTRIES.get(key)
+    now = time.monotonic()
+    if hit is None or now - hit[0] > ENTRIES_TTL or suffix not in hit[1]:
+        suffixes = (LATENT_SUFFIX, COND_SUFFIX) if suffix in (LATENT_SUFFIX, COND_SUFFIX) else (suffix,)
+        found = scan_many(root, suffixes)
+        if os.path.isdir(up):
+            for sfx, names in scan_many(up, suffixes, max_depth=1).items():
+                found[sfx] += [UPLOAD_TAG + n for n in names]
+        _ENTRIES.clear()
+        _ENTRIES[key] = (now, found)
+        hit = _ENTRIES[key]
+    return list(hit[1][suffix])
+
+
+def forget_entries():
+    """v0.4.15: the next entries() call walks the folders again (after an upload)."""
+    _ENTRIES.clear()
 
 
 def locate(value):
@@ -138,20 +159,26 @@ def clean_upload_name(filename):
 
 def scan(root, suffix, max_depth=MAX_DEPTH, limit=MAX_LISTED):
     """Paths (relative to root, '/' separated) of every file ending in `suffix`, newest first."""
+    return scan_many(root, (suffix,), max_depth, limit)[suffix]
+
+
+def scan_many(root, suffixes, max_depth=MAX_DEPTH, limit=MAX_LISTED):
+    """v0.4.15: scan() for several suffixes in ONE walk -> {suffix: [paths, newest first]}."""
     root = os.path.abspath(root)
-    found = []
+    found = {sfx: [] for sfx in suffixes}
     for dirpath, dirnames, filenames in os.walk(root):
         depth = 0 if dirpath == root else os.path.relpath(dirpath, root).count(os.sep) + 1
         dirnames[:] = [] if depth >= max_depth else [d for d in dirnames if d not in _SKIP_DIRS and not d.startswith(".")]
         for name in filenames:
-            if name.endswith(suffix):
-                full = os.path.join(dirpath, name)
-                try:
-                    found.append((os.path.getmtime(full), os.path.relpath(full, root).replace(os.sep, "/")))
-                except OSError as e:      # v0.0.9r: a file that vanished while listing is skipped
-                    _log.debug("could not read the time of '%s' (%s)", full, e)
-    found.sort(reverse=True)
-    return [rel for _, rel in found[:limit]]
+            for sfx in suffixes:
+                if name.endswith(sfx):
+                    full = os.path.join(dirpath, name)
+                    try:
+                        found[sfx].append((os.path.getmtime(full), os.path.relpath(full, root).replace(os.sep, "/")))
+                    except OSError as e:      # v0.0.9r: a file that vanished while listing is skipped
+                        _log.debug("could not read the time of '%s' (%s)", full, e)
+                    break
+    return {sfx: [rel for _, rel in sorted(items, reverse=True)[:limit]] for sfx, items in found.items()}
 
 
 def resolve(root, rel):
@@ -725,13 +752,15 @@ class IronLeo78_2in1_Revitalizer:
     @staticmethod
     def _vae_cached(name):
         """v0.1.4: a VAE, kept between runs (the video and the audio VAE: two entries)."""
-        return _cached("vae", _file_stamp("vae", name), lambda: _call("VAELoader", vae_name=name)[0])
+        # v0.4.13 (sweep O2): the pack's shared copy (model_cache.vae), the same one the MTV uses
+        return _cached("vae", _file_stamp("vae", name), lambda: _models.vae(name, lambda: _call("VAELoader", vae_name=name)[0]))
 
     def revitalize(self, **kw):
         """Runs the chain; every step (and any error, with a tip) is printed in the ComfyUI console."""
         live = Live()
         try:
-            return self._run(live, **kw)
+            with _models.busy():      # v0.4.12 (sweep B5): the MTV's free route waits while this runs
+                return self._run(live, **kw)
         except BaseException as e:                              # includes the user pressing Cancel
             live.error(e if not isinstance(e, KeyboardInterrupt) else RuntimeError("Interrupted by the user."))
             raise
@@ -911,11 +940,12 @@ def _register_routes():
             name = clean_upload_name(part.filename)
             if name is None:
                 refused.append(part.filename)
-                await part.read()                               # drain it
+                await part.release()                            # v0.4.14 (sweep N4): skipped without reading it into memory
                 continue
             target = os.path.join(folder, name)
             await save_upload_part(part, target)
             saved.append(name)
+        forget_entries()      # v0.4.15: the new files show in the lists at once
         return web.json_response({"saved": saved, "refused": refused})
 
 

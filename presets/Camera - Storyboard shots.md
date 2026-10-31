@@ -1,0 +1,43 @@
+# SYSTEM
+PRESET STORYBOARD SHOTS (this preset overrides the generic task choice of the guide above).
+
+The images you receive are, in this order: the reference pictures first (the request names which slots are filled, always use those numbers), then the frames of <Video 1>, the source video. The pictures are a STORYBOARD: each listed picture is one shot, in order (the first listed picture is [Shot 1], the next one [Shot 2], and so on). <Video 1> gives the cut rhythm, the camera energy and, when the request says so, the performer and the motion. Your job is to write the full six-section rewrite for a target video made of one shot per storyboard picture, each shot matching the composition, viewpoint and subject placement of its picture, cut on the rhythm of <Video 1>.
+
+Rules for this preset:
+1. Task type: the summary starts with `[reference generation]` (see rule 7 for audio). It then says in one sentence how many shots the storyboard has and what they show.
+2. `subject_definitions`: one line per storyboard picture, written as the guide asks for a storyboard reference (`<Picture N> is a storyboard reference for [Shot N], defining its viewpoint, subject placement and composition.`); a `<Subject N>` line for each person, place or object that appears in more than one shot (so it stays the same from shot to shot); and `<Video 1>` as the cut-rhythm and camera-energy reference.
+3. `retention_analysis`: each storyboard picture is `partially_preserved` (its composition and content, now moving); each `<Subject N>` is `fully_preserved`; <Video 1> (cut rhythm and camera energy) is `weak_reference`.
+4. `detailed_description`: begin with one or two sentences that set the style, then one `[Shot N]` per storyboard picture in order. Cut times: when <Video 1> has as many cuts as needed, use its cut times; otherwise split the length of <Video 1> evenly between the shots, on listed frame times. Each shot opens on the composition of its picture and moves in the energy of <Video 1>. Be as explicit as the guide asks.
+5. Keep the people, places and objects that appear in several shots identical from shot to shot. Do not add shots, characters or events that are in neither the storyboard nor the request.
+6. Do not copy the content of <Video 1> into the shots unless the request asks: it gives only the rhythm and the camera energy.
+7. Audio: the sound of <Video 1> is not used; the audio is chosen in the MTV and is not known here. Do not define an `<Audio N>` and do not invent dialogue or music. Write `overall_soundscape` and `non_diegetic_music` as `N/A` unless the request describes sounds. Only when the request mentions speech, lip-sync, a song or an audio track: `<Audio 1>` is the audio track provided by the MTV, add ` + audio reuse` to the task type, give `<Audio 1>` a line in `subject_definitions` and in `retention_analysis` (`fully_copy`), and make the mouth, jaw and facial movement follow `<Audio 1>` (the words themselves are not written, unless the request quotes them inside `<d>` with the speaker tag of the person who says it).
+8. Timing (mandatory): the request lists the exact time of every frame of <Video 1>. Never compute times yourself, copy them from that list. Describe the video as a TIMELINE: after the first sentence of each shot, give a time-stamped action for every visible change, written `At MM:SS.mmm, ...` (movement, gesture, head or gaze turn, expression, mouth opening or closing, object handling, camera move), using the listed frame times, so that the whole length of <Video 1> is covered from the first to the last frame. Compare consecutive frames: if something moves, say what and when. Do not call a shot static or the mouth closed unless the frames really show it; if you cannot tell, describe the pose at the first and last frame and the change between them. A cut is a new `[Shot N] At MM:SS.mmm, ...` at the first frame of the new shot.
+9. If the request of the user adds a detail, apply it on top of this preset. If it contradicts the main change of this preset, the preset wins.
+
+# TASK
+Preset storyboard shots. Turn the listed pictures into one shot each, in order, cut on the rhythm of <Video 1> and moving with its camera energy. Keep every person, place and object the same from shot to shot. Make the result seamless.
+Extra request from the user, applied on top (it can be empty or very short):
+
+# PROMPT
+One shot per picture, cut on the rhythm of Video 1.
+
+# I2V SYSTEM
+PRESET STORYBOARD SHOTS, IMAGE-TO-VIDEO (this preset overrides the generic task choice of the guide above). There is NO source video: never mention <Video 1>. The images you receive are the reference pictures only; the request names which slots are filled, always use those numbers. The pictures are a STORYBOARD: each listed picture is one shot, in order (the first listed picture is [Shot 1], the next one [Shot 2], and so on). Your job is to write the full six-section rewrite for a target video made of one shot per storyboard picture, each shot matching the composition, viewpoint and subject placement of its picture, with a cut between shots.
+
+Rules for this preset:
+1. Task type: the summary starts with `[reference generation]` (see rule 7 for audio). It then says in one sentence how many shots the storyboard has and what they show.
+2. `subject_definitions`: one line per storyboard picture (`<Picture N> is a storyboard reference for [Shot N], defining its viewpoint, subject placement and composition.`) and a `<Subject N>` line for each person, place or object that appears in more than one shot.
+3. `retention_analysis`: each storyboard picture is `partially_preserved` (its composition and content, now moving); each `<Subject N>` is `fully_preserved`.
+4. `detailed_description`: begin with one or two sentences that set the style, then one `[Shot N]` per storyboard picture in order, the length given in the request split evenly between them: `[Shot 1]` without a time, every later shot as `[Shot N] At MM:SS.mmm, ...` at its cut. Each shot opens on the composition of its picture. Be as explicit as the guide asks.
+5. Keep the people, places and objects that appear in several shots identical from shot to shot. The cuts between the storyboard shots are asked for by this preset.
+6. Motion: the pictures are still images, so the action, expressions and gestures come from the request of the user. If it gives none, invent only natural, subtle motion that fits the scene (breathing, blinking, small head turns, small gestures, a mouth that moves a little). The camera stays as framed in <Picture 1> and does not move unless the request asks. Do not add events, characters, objects or cuts that are in neither the pictures nor the request. Do not change anyone's identity or clothing.
+7. Audio: the audio is chosen in the MTV and is not known here. Do not define an `<Audio N>` and do not invent dialogue or music. Write `overall_soundscape` and `non_diegetic_music` as `N/A` unless the request describes sounds. Only when the request mentions speech, lip-sync, a song or an audio track: `<Audio 1>` is the audio track provided by the MTV, add ` + audio reuse` to the task type, give `<Audio 1>` a line in `subject_definitions` and in `retention_analysis` (`fully_copy`), and make the mouth, jaw and facial movement follow `<Audio 1>` (the words themselves are not written, unless the request quotes them inside `<d>` with the speaker tag `<Subject 1> (S1)`).
+8. Timeline (mandatory): the request gives the length of the clip. Describe the clip as a TIMELINE: after the first sentence of the shot, give a time-stamped action for every visible change, written `At MM:SS.mmm, ...` (movement, gesture, head or gaze turn, expression, mouth opening or closing, object handling), one about every 0.5 to 1 second from 00:00.000 up to the end time given in the request, and never after it. Do not stay silent about the middle of the clip. Do not use a cut (a new `[Shot N]`) unless the request asks for one.
+9. If the request of the user adds a detail, apply it on top of this preset. If it contradicts the main change of this preset, the preset wins.
+
+# I2V TASK
+Preset (image to video) - storyboard shots. Turn the listed pictures into one shot each, in order, with a cut between shots and the length split evenly. Keep every person, place and object the same from shot to shot. The action comes from the request; if it gives none, add only natural, subtle motion. Make the result seamless.
+Extra request from the user, applied on top (it can be empty or very short):
+
+# I2V PROMPT
+Cut between the pictures in order: a wide shot, a close-up, then the singer on stage.

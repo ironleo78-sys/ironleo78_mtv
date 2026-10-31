@@ -7,12 +7,16 @@ MTV_Prompt, the text for the MTV node's prompt. The LLM settings the user does n
 """
 import gc
 import hashlib
+import logging
 import os
 
 import folder_paths
 
-from .nine_images import IronLeo78_9ImagesToBatchToLLM as _Loader, SLOTS, preset_prompts, preset_audio_info
+from .nine_images import IronLeo78_9ImagesToBatchToLLM as _Loader, SLOTS, preset_prompts, preset_audio_info, PRESET_ALIASES, effective_aliases
 from .mtv import PICTURES_TYPE
+from . import model_cache as _models
+
+log = logging.getLogger("IronLeo78.MTV")      # v0.4.13 (sweep O6): logging instead of print
 
 NODE_ID = "IronLeo78_MTV_PromptGenerator"
 GUIDE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "guide", "Claude.Minimax.md")
@@ -81,7 +85,7 @@ def _get_clip(name, keep):
         del _KEPT[k]
     if keep and key in _KEPT:
         _KEPT[key] = _KEPT.pop(key)                                # most recently used goes last
-        print("[IronLeo78] LLM reused from RAM (no reload from disk)")
+        log.info("LLM reused from RAM (no reload from disk)")
         return _KEPT[key], True
     if not keep:
         _KEPT.clear()                                              # the switch is off: give the RAM back
@@ -194,10 +198,17 @@ class IronLeo78_MTV_PromptGenerator(_Loader):
             g = f"{st.st_size}:{st.st_mtime_ns}"
         except OSError:
             g = ""
-        kw = {k: v for k, v in kw.items() if k != "Keep LLM in RAM"}      # v0.3.17: the switch changes no text: toggling it must not re-run the LLM
+        # v0.3.17 left the switch out of this hash (it changes no text). v0.4.12 (sweep B4): that does NOT stop a re-run: ComfyUI's
+        # cache key also holds every widget value, so toggling "Keep LLM in RAM" still runs the node (and the LLM) once more.
+        # Only moving the switch off the node would avoid it.
+        kw = {k: v for k, v in kw.items() if k != "Keep LLM in RAM"}
         return hashlib.sha256(f"{_Loader.IS_CHANGED(**kw)}|guide:{g}".encode()).hexdigest()
 
-    def run(self, Start_From, Duration, Frame_Interval, Video_Size, Preset="None", prompt="", LLM=DEFAULT_LLM, Mode="v2v", Seed=0, **kw):
+    def run(self, *args, **kw):
+        with _models.busy():      # v0.4.12 (sweep B5): the MTV's free route waits while the LLM runs
+            return self._run(*args, **kw)
+
+    def _run(self, Start_From, Duration, Frame_Interval, Video_Size, Preset="None", prompt="", LLM=DEFAULT_LLM, Mode="v2v", Seed=0, **kw):
         use_llm = kw.pop("Use LLM", True)           # v0.1.25 (the widget name has a space: it cannot be a parameter)
         keep_ram = bool(kw.pop("Keep LLM in RAM", True))       # v0.3.16 (v0.4.3: ON when not sent)
         if not use_llm:
@@ -206,10 +217,10 @@ class IronLeo78_MTV_PromptGenerator(_Loader):
             kw["video"] = ""
             out = super().run(Start_From, Duration, Frame_Interval, Video_Size, Preset="None", Mode=Mode, **kw)
             return (list(out[1:1 + SLOTS]), prompt)
+        if LLM not in _llm_files():      # v0.4.13 (sweep O4): checked BEFORE the video is decoded
+            raise FileNotFoundError(f"LLM file not found in models/text_encoders: {LLM}")
         out = super().run(Start_From, Duration, Frame_Interval, Video_Size, Preset=Preset, Mode=Mode, **kw)
         batch, pics, frame_text = out[0], out[1:1 + SLOTS], out[-1]
-        if LLM not in _llm_files():
-            raise FileNotFoundError(f"LLM file not found in models/text_encoders: {LLM}")
         request = build_request(frame_text, prompt)
         base = _vram_mb()                           # v0.3.12: what the GPU already holds before the LLM
         clip, _reused = _get_clip(LLM, keep_ram)
@@ -224,11 +235,11 @@ class IronLeo78_MTV_PromptGenerator(_Loader):
                 _free()                              # the MTV / Revitalizer get the VRAM back
             after = _vram_mb()
             if before is not None and after is not None:      # v0.3.7: the console shows whether the unload really freed the memory
-                print(f"[IronLeo78] LLM {'left the GPU (kept in RAM)' if keep_ram else 'unloaded'}: GPU memory in use {before:.0f} MB -> {after:.0f} MB")
+                log.info("LLM %s: GPU memory in use %.0f MB -> %.0f MB", "left the GPU (kept in RAM)" if keep_ram else "unloaded", before, after)
                 if not keep_ram and _needs_forced_unload(base, before, after):      # v0.3.12: it did not: unload everything (the next model loads again when needed)
                     _force_unload()
                     after2 = _vram_mb()
-                    print(f"[IronLeo78] the LLM was still in GPU memory: forced unload, now {after2:.0f} MB" if after2 is not None else "[IronLeo78] forced unload done")
+                    log.info("the LLM was still in GPU memory: forced unload, now %.0f MB" % after2 if after2 is not None else "forced unload done")
         return (list(pics), text)
 
 
@@ -247,7 +258,7 @@ def _register_routes():
     @routes.get(PRESETS_ROUTE)
     async def presets_route(request):
         info = preset_audio_info()
-        return web.json_response({"ok": True, "presets": preset_prompts(), "i2v": preset_prompts("i2v"),
+        return web.json_response({"ok": True, "presets": preset_prompts(), "i2v": preset_prompts("i2v"), "aliases": effective_aliases(),      # v0.5.0; v0.6.0 (M1): only the ones that apply
                                   "audio": {k: v["audio"] for k, v in info.items()}, "stems": {k: v["stem"] for k, v in info.items()}})
 
 

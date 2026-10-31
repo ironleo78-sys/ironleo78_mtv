@@ -1,7 +1,7 @@
 // Test of web/il78_sync_logic.js (gating + sync maths) with a fake MTV node and a fake fetchApi. Plain node, no dependencies:
 //   node tests/test_sync_logic.mjs        (ComfyUI only loads web/, so this folder is ignored at runtime)
 import assert from "node:assert/strict";
-import { gate, planSync, normFile, collectNodes } from "../web/il78_sync_logic.js";
+import { gate, planSync, normFile, collectNodes, liveNodes, presetAlias } from "../web/il78_sync_logic.js";
 import fs from "node:fs";
 
 const mtv = (over = {}, id = 7, mode = 0) => ({
@@ -313,6 +313,43 @@ await t("no polling while the browser tab is hidden (both panels)", () => {
   assert.match(nine, /setInterval\(\(\) => \{ if \(!document\.hidden\) updateSyncGate\(\); \}, 500\)/);
   assert.match(mtvjs, /const refresh = \(\) => \{\s*if \(typeof document !== "undefined" && document\.hidden\) return;/);
   assert.match(nine, /collectNodes\(app\.rootGraph \|\| app\.graph, node\.graph\)/);
+});
+
+await t("liveNodes (v0.4.14 N2): placed subgraphs count, a leftover definition in the subgraphs map does not", () => {
+  const def = { nodes: [mtv({}, 5)] };                             // a subgraph holding an MTV
+  const placed = { _nodes: [{ id: 1, subgraph: def }], subgraphs: new Map([["s", def]]) };
+  assert.ok(liveNodes(placed).some((x) => x.comfyClass === "IronLeo78_MTV"), "an MTV inside a placed subgraph is still there");
+  const deleted = { _nodes: [{ id: 2 }], subgraphs: new Map([["s", def]]) };      // the instance is gone, the definition stays
+  assert.ok(!liveNodes(deleted).some((x) => x.comfyClass === "IronLeo78_MTV"), "only the definition is left: not counted");
+  assert.ok(collectNodes(deleted).some((x) => x.comfyClass === "IronLeo78_MTV"), "(collectNodes, used for Sync / mirroring, still sees it)");
+  const loop = { nodes: [] };
+  loop.nodes.push({ id: 3, subgraph: loop });
+  assert.deepEqual(liveNodes(loop).map((x) => x.id), [3]);
+  assert.deepEqual(liveNodes(undefined), []);
+});
+await t("the MTV's free check uses liveNodes (v0.4.14)", () => {
+  const mtvjs = fs.readFileSync(new URL("../web/ironleo78_mtv.js", import.meta.url), "utf8");
+  assert.match(mtvjs, /const stillThere = liveNodes\(app\.rootGraph \|\| app\.graph\)\.some/);
+});
+
+await t("presetAlias (v0.5.0): an old numbered preset name gets its new name, anything else is left alone", () => {
+  const aliases = { "1 - Replace main actor": "Swap - Main actor", "8 - Drummer performance": "Musician - Drummer" };
+  assert.equal(presetAlias("1 - Replace main actor", aliases), "Swap - Main actor");
+  assert.equal(presetAlias("Swap - Main actor", aliases), null);
+  assert.equal(presetAlias("None", aliases), null);
+  assert.equal(presetAlias("", aliases), null);
+  assert.equal(presetAlias("1 - Replace main actor", undefined), null);
+  assert.equal(presetAlias("1 - Replace main actor", aliases, ["None", "Swap - Main actor"]), "Swap - Main actor");
+  assert.equal(presetAlias("1 - Replace main actor", aliases, ["None", "12 - IronLeo78 Mode"]), null);      // v0.6.0 (M1): not offered: no rename
+});
+await t("the Prompt Generator renames an old preset WITHOUT its callback (the user's prompt stays)", () => {
+  const nine = fs.readFileSync(new URL("../web/ironleo78_9images.js", import.meta.url), "utf8");
+  const block = nine.slice(nine.indexOf("const next = presetAlias("), nine.indexOf("const next = presetAlias(") + 200);
+  assert.match(block, /w\.value = next;/);
+  assert.doesNotMatch(block, /callback/);
+  assert.match(nine, /presetAlias\(w\.value, j\?\.aliases, w\.options\?\.values\)/);                 // v0.6.0 (M1)
+  assert.match(nine, /const pname = presetAlias\(wp\.value, j\?\.aliases\) \|\| wp\.value;/);       // v0.6.0 (M2)
+  assert.match(nine, /j\?\.audio\?\.\[pname\]/);
 });
 
 console.log(`${n} tests passed`);

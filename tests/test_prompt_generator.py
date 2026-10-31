@@ -94,11 +94,11 @@ class RunTests(unittest.TestCase):
         self.assertEqual(self.freed, [1])
 
     def test_preset_goes_between_the_frame_info_and_the_prompt(self):
-        name = [n for n in gen._Loader.INPUT_TYPES()["required"]["Preset"][0] if n != "None"][0]
+        name = "Swap - Main actor"      # v0.5.0: picked by name (the list is alphabetical now)
         self.run_node(Preset=name)
         req = self.calls["request"]
-        self.assertIn("PRESET 1", req)
-        self.assertTrue(req.index("There are no reference pictures") < req.index("PRESET 1") < req.index("Replace him."))
+        self.assertIn("PRESET REPLACE THE MAIN ACTOR", req)
+        self.assertTrue(req.index("There are no reference pictures") < req.index("PRESET REPLACE THE MAIN ACTOR") < req.index("Replace him."))
 
     def test_llm_off_passes_the_prompt_through(self):
         out = self.run_node(**{"Use LLM": False, "prompt": "  keep me exactly  ", "LLM": "not-installed.safetensors"})
@@ -111,7 +111,7 @@ class RunTests(unittest.TestCase):
         self.assertEqual(self.calls["request"].split("\n")[-1], "Replace him.")      # ON (also the default) still uses the LLM
 
     def test_i2v_mode_has_no_video_and_its_own_texts(self):
-        name = [n for n in gen._Loader.INPUT_TYPES()["required"]["Preset"][0] if n != "None"][0]
+        name = "Swap - Main actor"      # v0.5.0: picked by name (the list is alphabetical now)
         self.run_node(Preset=name, Mode="i2v", video="not-a-real-video.mp4", Duration=7.0)        # a loaded video is ignored: it is not even looked up
         req = self.calls["request"]
         self.assertIn("image-to-video request", req)
@@ -120,10 +120,10 @@ class RunTests(unittest.TestCase):
         self.assertIn("00:07.000", req)
         self.assertNotIn("frame 1 =", req)                                   # no frame times without a video
         self.assertIn("IMAGE-TO-VIDEO", req)                                 # the i2v system text, not the v2v one
-        self.assertNotIn("PRESET 1 - REPLACE THE MAIN ACTOR (this preset", req)
+        self.assertNotIn("PRESET REPLACE THE MAIN ACTOR (this preset", req)
         self.assertTrue(req.index("image-to-video request") < req.index("IMAGE-TO-VIDEO") < req.index("Replace him."))
         self.run_node(Preset=name, Mode="v2v")
-        self.assertIn("PRESET 1 - REPLACE THE MAIN ACTOR (this preset", self.calls["request"])      # v2v as before
+        self.assertIn("PRESET REPLACE THE MAIN ACTOR (this preset", self.calls["request"])      # v2v as before
 
     def test_i2v_with_a_preset_that_has_no_i2v_text_is_a_clear_error(self):
         import tempfile
@@ -142,7 +142,7 @@ class RunTests(unittest.TestCase):
 
     def test_gaps_in_the_slots_give_consistent_labels(self):
         # slots 1 and 3 filled (slot 2 empty): the rules and the request use the MTV labels <Picture 1> / <Picture 2>
-        name = [n for n in gen._Loader.INPUT_TYPES()["required"]["Preset"][0] if n.startswith("3 - ")][0]
+        name = "Swap - Two actors and environment"      # v0.5.0: was "3 - ..."
         import torch as _t
         gen._Loader.__mro__[0].__dict__                                          # (no-op: keeps the import used)
         ni = sys.modules[gen._Loader.__module__]
@@ -205,11 +205,12 @@ class RunTests(unittest.TestCase):
         resp = asyncio.run(got["/ironleo78/mtv/presets"](None))
         body = json.loads(resp.text)
         self.assertTrue(body["ok"])
-        self.assertEqual(set(body), {"ok", "presets", "i2v", "audio", "stems"})
-        self.assertEqual(len(body["presets"]), 13)                                  # None + the 12 presets
-        self.assertEqual(body["stems"]["8 - Drummer performance"], "Drums")
-        self.assertEqual(body["audio"]["12 - IronLeo78 Mode"], "Custom Audio")
-        self.assertTrue(body["i2v"]["1 - Replace main actor"].startswith("Replace the main character of Picture 1"))
+        self.assertEqual(set(body), {"ok", "presets", "i2v", "audio", "stems", "aliases"})      # v0.5.0: + aliases
+        self.assertEqual(len(body["presets"]), 53)                                  # None + the 52 presets (v0.5.0: renamed "Category - Name", + 27)
+        self.assertEqual(body["aliases"]["8 - Drummer performance"], "Musician - Drummer")
+        self.assertEqual(body["stems"]["Musician - Drummer"], "Drums")
+        self.assertEqual(body["audio"].get("Personal - IronLeo78 Mode") or body["audio"].get("12 - IronLeo78 Mode"), "Custom Audio")      # v0.6.0 (M3): either file name
+        self.assertTrue(body["i2v"]["Swap - Main actor"].startswith("Replace the main character of Picture 1"))
 
     def test_forced_unload_only_when_the_llm_stayed_in_memory(self):
         f = gen._needs_forced_unload
@@ -220,8 +221,11 @@ class RunTests(unittest.TestCase):
     def test_forced_unload_edges(self):
         f = gen._needs_forced_unload
         self.assertFalse(f(1000, 1300, 1300))                 # the LLM added only 300 MB: not worth it
-        self.assertFalse(f(None, 5000, 4800)); self.assertFalse(f(1000, None, 4800)); self.assertFalse(f(1000, 5000, None))   # no CUDA: never
-        self.assertTrue(f(0, 4000, 4000)); self.assertFalse(f(0, 4000, 0))
+        self.assertFalse(f(None, 5000, 4800))   # no CUDA: never
+        self.assertFalse(f(1000, None, 4800))
+        self.assertFalse(f(1000, 5000, None))
+        self.assertTrue(f(0, 4000, 4000))
+        self.assertFalse(f(0, 4000, 0))
 
     def test_the_fallback_runs_when_the_first_unload_did_not_free_the_memory(self):
         self.addCleanup(setattr, gen, "_vram_mb", gen._vram_mb)          # these patches must not leak into the other tests
@@ -293,6 +297,35 @@ class RunTests(unittest.TestCase):
     def test_missing_llm_file_is_a_clear_error(self):
         with self.assertRaises(FileNotFoundError):
             self.run_node(LLM="nope.safetensors")
+
+    def test_missing_llm_file_fails_before_the_video_is_decoded(self):
+        # v0.4.16 (sweep D3, checks 0.4.13 O4): the LLM file is checked first, so a wrong name never costs a video decode
+        ni = sys.modules[gen._Loader.__module__]
+        old = ni._decode_video_for_llm, ni.folder_paths
+        decoded = []
+        ni._decode_video_for_llm = lambda *a: decoded.append(a) or (None, 0)
+        class FP:
+            exists_annotated_filepath = staticmethod(lambda v: True)
+            get_annotated_filepath = staticmethod(lambda v: v)
+        ni.folder_paths = FP
+        try:
+            with self.assertRaises(FileNotFoundError):
+                self.run_node(LLM="nope.safetensors", video="clip.mp4")
+        finally:
+            ni._decode_video_for_llm, ni.folder_paths = old
+        self.assertEqual(decoded, [])
+
+    def test_the_busy_flag_is_set_while_it_runs(self):
+        # v0.4.16 (sweep D3, checks 0.4.12 B5): the MTV's free route waits while the Prompt Generator runs
+        seen = []
+        real = gen.generate
+        gen.generate = lambda *a, **k: seen.append(gen._models.is_busy()) or "T"
+        try:
+            self.run_node()
+        finally:
+            gen.generate = real
+        self.assertEqual(seen, [True])
+        self.assertFalse(gen._models.is_busy())
 
     def test_llm_is_freed_even_when_generation_fails(self):
         def boom(*a):
@@ -378,7 +411,8 @@ class RunTests(unittest.TestCase):
         mmod.unload_model_and_clones = lambda patcher: seen.append(patcher)
         mmod.soft_empty_cache = lambda: seen.append("empty")
         saved = {k: sys.modules.get(k) for k in ("comfy", "comfy.model_management")}
-        pkg = types.ModuleType("comfy"); pkg.model_management = mmod
+        pkg = types.ModuleType("comfy")
+        pkg.model_management = mmod
         sys.modules["comfy"], sys.modules["comfy.model_management"] = pkg, mmod
         self.addCleanup(lambda: [sys.modules.__setitem__(k, v) if v is not None else sys.modules.pop(k, None) for k, v in saved.items()])
         fell = []

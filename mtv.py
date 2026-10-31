@@ -1,5 +1,5 @@
 """
-IronLeo78 MTV  v0.4.8  (pre-alpha)
+IronLeo78 MTV  v0.6.3  (pre-alpha)
 ------------------------------------------------------------
 Makes a music video clip by clip, synced to YOUR audio (a singer / musician performance track).
 Loader + MiniMax H3 reference-to-video conditioning + sampling + decode + save, in ONE node, one clip per Run.
@@ -55,7 +55,6 @@ manifest CSV (<Song>_manifest.csv).
 
 import collections
 import contextlib
-import csv
 import datetime
 import gc
 import hashlib
@@ -64,14 +63,11 @@ import logging
 import math
 import os
 import re
-import shutil
 import sys
-import threading
 
 import numpy as np
 import torch
 import torch.nn.functional as F
-from PIL import Image
 
 import folder_paths
 import comfy.sd
@@ -81,16 +77,14 @@ import nodes as comfy_nodes
 
 from . import stems as _stems
 from . import conditioning_io as _cond_io
-from . import video_orientation as _orient
-from . import video_reader as _reader
 from . import model_cache as _models
 from .consts import _truthy, NONE_CHOICE, RESIZE_METHOD, SCENE_TAG, MANIFEST_FIELDS, VIDEO_EXTS, AUDIO_EXTS
-from .core_call import _core, _preview_scope, _first_output, _core_options, _vae_options      # v0.3.17: moved to core_call.py (v0.4.5: only the names mtv.py and the tests use)
-from .naming import _append_manifest, _clip_prefix, _manifest_path, _project_name, _song_name, _write_sidecar      # v0.3.17: moved to naming.py
+from .core_call import (_core, _preview_scope, _first_output)
+from .naming import (_append_manifest, _clip_prefix, _project_name, _song_name, _write_sidecar)      # v0.3.17: moved to naming.py
 from .media_decode import (_decode_audio, _decode_video, _fit_frame, _minimax_frames, _open_media, _resize, _resolve_video_path, _seek, _shape_video_frame, _target_size, _video_frame_plan)      # v0.3.17: moved to media_decode.py
-from .state import (DATA_DIR, DATA_FILES, GUIDE_FRAME_IDX, LAST_FRAME_FILE, PACK_DIR, SONGS_STATE_KEY, STATE_FILE, _COUNTER_FIELDS, _STATE_LOCK, _clip_from_manifest, _clip_last_frame_array, _clip_saved_near, _counter, _counter_key, _counter_label, _data_dir, _handle_jump, _jump_to, _last_frame_file, _last_frame_of, _load_furthest, _load_index, _load_last_frame, _load_state, _move_old_data, _moved, _reset_state, _save_index, _save_last_frame, _store_counter, _to_int, _write_state)      # moved to state.py (still reachable as mtv.<name>)
-from .settings import (MIN_STEPS, MAX_STEPS, AUDIO_CACHE_MAX_BYTES, COND_CACHE_MAX, CORE_ATTN_NODE, CORE_VAE_NODE, CREDIT, DEFAULT_ATTENTION, DEFAULT_AUDIO_VAE, DEFAULT_CUSTOM_LORA, DEFAULT_CUSTOM_LORA_ENABLED, DEFAULT_CUSTOM_LORA_STR, DEFAULT_DURATION, DEFAULT_FPS, DEFAULT_MEGAPIXELS, DEFAULT_QWEN_VL, DEFAULT_SAVE_LATENT, DEFAULT_SEED, DEFAULT_TURBO_LORA, DEFAULT_TURBO_LORA_STR, DEFAULT_UNET, DEFAULT_VIDEO_VAE, DENOISE, DIVISIBLE_BY, FIXED_SETTINGS, FREE_ROUTE, FULL_STEPS, JUMP_ROUTE, LOADER_DEFAULTS_ROUTE, LORA_SLOTS, MAX_REF_AUDIO_SECONDS, MAX_SEED, MIN_REF_AUDIO_SECONDS, MODELS_TYPE, MODEL_FILE_KEYS, MODEL_STEP_KEYS, NONE_LORA, PICTURES_INPUT, PICTURES_TYPE, PICTURE_INPUT, RESET_DEFAULTS_ROUTE, RESET_ROUTE, SAMPLER_NAME, SAVE_DEFAULTS_ROUTE, SAVE_FORMAT, SAVE_LATENT_MISSING, SCHEDULER_NAME, SEED_CONTROLS, SEGMENT_ROUTE, TURBO_STEPS, VERSION, VIDEO_CODEC, VIDEO_COLOR_SPACE)      # moved to settings.py (still reachable as mtv.<name>)
-from .defaults import (DEFAULTS_FILE, _check_models, _defaults_key_map, _defaults_stamp, _normalize_default, _read_user_defaults, _read_user_seed_control, apply_model_overrides, apply_saved_defaults, clear_user_defaults, factory_defaults, loader_defaults, missing_default_files, save_user_defaults)      # moved to defaults.py (still reachable as mtv.<name>)
+from .state import (DATA_DIR, GUIDE_FRAME_IDX, LAST_FRAME_FILE, PACK_DIR, STATE_FILE, _STATE_LOCK, _clip_from_manifest, _clip_last_frame_array, _clip_saved_near, _counter_key, _counter_label, _data_dir, _handle_jump, _jump_to, _last_frame_file, _last_frame_of, _load_furthest, _load_index, _load_last_frame, _load_state, _move_old_data, _reset_state, _save_index, _save_last_frame, _write_state)
+from .settings import (AUDIO_CACHE_MAX_BYTES, COND_CACHE_MAX, CORE_ATTN_NODE, CORE_VAE_NODE, CREDIT, DEFAULT_AUDIO_VAE, DEFAULT_CUSTOM_LORA, DEFAULT_CUSTOM_LORA_ENABLED, DEFAULT_DURATION, DEFAULT_FPS, DEFAULT_GUIDE, DEFAULT_MEGAPIXELS, DEFAULT_QWEN_VL, DEFAULT_SAVE_LATENT, DEFAULT_SEED, DEFAULT_TURBO_LORA, DEFAULT_UNET, DEFAULT_VIDEO_VAE, DENOISE, DIVISIBLE_BY, FIXED_SETTINGS, FREE_ROUTE, FULL_STEPS, JUMP_ROUTE, LOADER_DEFAULTS_ROUTE, LORA_SLOTS, MAX_REF_AUDIO_SECONDS, MIN_REF_AUDIO_SECONDS, MODELS_TYPE, MODEL_FILE_KEYS, NONE_LORA, PICTURES_INPUT, PICTURES_TYPE, PICTURE_INPUT, RESET_DEFAULTS_ROUTE, RESET_ROUTE, SAMPLER_NAME, SAVE_DEFAULTS_ROUTE, SAVE_FORMAT, SAVE_LATENT_MISSING, SCHEDULER_NAME, SEGMENT_ROUTE, TURBO_STEPS, VERSION, VIDEO_CODEC, VIDEO_COLOR_SPACE)
+from .defaults import (DEFAULTS_FILE, _check_models, _defaults_stamp, _read_user_defaults, _read_user_seed_control, apply_model_overrides, apply_saved_defaults, clear_user_defaults, factory_defaults, loader_defaults, missing_default_files, save_user_defaults)
 
 try:      # v0.0.5: a quiet stop (all segments done) must not feed anything to a Save Video linked to the outputs
     from comfy_execution.graph_utils import ExecutionBlocker
@@ -485,7 +479,8 @@ _DURATION_CACHE = {}              # (kind, file id) -> seconds
 
 def _probe_seconds(name, kind):
     """Length in seconds of a video / audio file of the input folder, from the container header (cached).
-    kind = 'video' | 'audio'. None when it cannot be read."""
+    kind = 'video' (the picture stream) | 'soundtrack' (a video's audio stream, v0.4.12) | 'audio' (a custom audio file).
+    None when it cannot be read."""
     fid = _file_id(name)
     if fid is None:
         return None
@@ -496,12 +491,16 @@ def _probe_seconds(name, kind):
     try:
         container = _open_media(folder_paths.get_annotated_filepath(name))
         try:
-            if container.duration:
+            streams = container.streams.video if kind == "video" else container.streams.audio
+            # v0.4.12 (sweep B8): a video's length is its PICTURE stream's own length when the file states it (kind 'video'), and
+            # a video's soundtrack is its AUDIO stream's (kind 'soundtrack'). The container length is the longest stream, and a
+            # soundtrack that runs past the picture counted one segment too many.
+            if kind in ("video", "soundtrack") and streams and streams[0].duration:
+                seconds = float(streams[0].duration * streams[0].time_base)
+            elif container.duration:
                 seconds = container.duration / 1_000_000.0
-            else:
-                streams = container.streams.video if kind == "video" else container.streams.audio
-                if streams and streams[0].duration:
-                    seconds = float(streams[0].duration * streams[0].time_base)
+            elif streams and streams[0].duration:
+                seconds = float(streams[0].duration * streams[0].time_base)
         finally:
             container.close()
     except Exception as e:
@@ -586,7 +585,7 @@ def _segment_plan(p):
             sources.append({"name": "custom audio", "seconds": length,
                             "segments": max(0, math.ceil(length / seg_seconds - 1e-9))})
     if not use_video and bypass and not chunk_custom and usable("Video File"):
-        length = _probe_seconds(p["Video File"], "video")
+        length = _probe_seconds(p["Video File"], "soundtrack")      # v0.4.12: the soundtrack's own length
         if length:
             sources.append({"name": "video soundtrack", "seconds": length,
                             "segments": max(0, math.ceil(length / seg_seconds - 1e-9))})
@@ -792,15 +791,15 @@ class IronLeo78_MTV:
         # ===== save latent (v0.6). Takes the place of the old "Latent Upscale" widget =====
         r["Save Latent"] = ("BOOLEAN", {
             "default": DEFAULT_SAVE_LATENT, "label_on": "ON", "label_off": "OFF",
-            "tooltip": "ON (default): the sampled latent (video + audio .latent files) and the conditioning "
+            "tooltip": "OFF by default (v0.6.2). ON: the sampled latent (video + audio .latent files) and the conditioning "
                        "(.conditioning: prompt + pictures, no guide) are saved in the song folder, named like the clip "
                        "(see the filename output), so you can refine / upscale it later in another workflow (2in1 Revitalizer). "
                        "OFF: no latent files. (The clip itself is saved by the Save Video node you link.)",
         })
         # ===== guide (v2.0) =====
         r["Guide"] = ("BOOLEAN", {
-            "default": True, "label_on": "ON", "label_off": "OFF",
-            "tooltip": "Only works with Next Segment On Run = ON. ON: the last frame of the previous run "
+            "default": DEFAULT_GUIDE, "label_on": "ON", "label_off": "OFF",      # v0.6.2: OFF on a new node
+            "tooltip": "OFF by default (v0.6.2). Only works with Next Segment On Run = ON. ON: the last frame of the previous run "
                        "is used as a guide for the first frame of this segment, so the clips continue "
                        "each other. The first segment (or a run with no saved frame from the segment "
                        "before) runs without a guide. OFF: no guide.",
@@ -984,7 +983,8 @@ class IronLeo78_MTV:
         def vae(tag, label, stage):
             name = kw[f"{tag}_name"]
             key = _stamp("vae", name)
-            return _cached(uid, stage, key, lambda: _stage(stage, self._load_vae, name, label))
+            # v0.4.13 (sweep O2): the loaded VAE is the pack's shared copy (model_cache.vae), the same one the Revitalizer uses
+            return _cached(uid, stage, key, lambda: _stage(stage, _models.vae, name, lambda: self._load_vae(name, label)))
 
         return (model,
                 clip("qwen_vl", "Qwen-VL", "clip qwen-vl"),
@@ -1022,7 +1022,13 @@ class IronLeo78_MTV:
         rate = info["rate"]
         audio = _decode_audio(video, skip / rate, images.shape[0] / rate)  # None = no sound
 
-        total = int(round(info["duration"] * rate)) if info["duration"] > 0 else 0
+        # v0.4.16 (sweep N5): the picture stream's own length, the same one the segment panel counts with (B8, 0.4.12);
+        # info["duration"] is the container's (the longest stream) and could disagree when the soundtrack runs longer
+        try:
+            seconds_total = _probe_seconds(kw.get("Video File"), "video") or info["duration"]
+        except Exception:
+            seconds_total = info["duration"]
+        total = int(round(seconds_total * rate)) if seconds_total and seconds_total > 0 else 0
         end = skip + span - 1
         if total > 0:
             end = min(end, total - 1)
@@ -1718,7 +1724,15 @@ class IronLeo78_MTV:
                 except Exception as e:
                     log.warning("Could not save the last frame for the guide: %s", e)
                     notes.append(f"last frame not saved ({e})")
-            _save_index(self._pending_index, kw["counter_key"])
+            try:      # v0.4.12 (sweep B1): the clip is made: a counter that cannot be saved must not lose it (Windows "Access denied")
+                _save_index(self._pending_index, kw["counter_key"])
+            except Exception as e:
+                if _is_interrupt(e):
+                    raise
+                warn = (f"WARNING: the segment counter could not be saved ({e}): the next Run makes segment "
+                        f"{self._pending_index} AGAIN. Use Go in the segment panel to move on to segment {self._pending_index + 1}.")
+                log.warning("[IronLeo78 MTV] %s", warn)
+                notes.append(warn)
 
         # ---- status text ----
         start = float(media.get("timeline_start", 0.0))
@@ -1790,4 +1804,4 @@ class IronLeo78_MTV:
 _register_routes()
 
 NODE_CLASS_MAPPINGS = {"IronLeo78_MTV": IronLeo78_MTV}
-NODE_DISPLAY_NAME_MAPPINGS = {"IronLeo78_MTV": "IronLeo78 MTV (v0.4.8)"}
+NODE_DISPLAY_NAME_MAPPINGS = {"IronLeo78_MTV": "IronLeo78 MTV (v0.6.3)"}

@@ -1,6 +1,6 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
-import { gate as syncGate, planSync, collectNodes, mirrorVideo, suggestPrompt, applyPresetAudio, gateI2v, planSyncI2v, customAudioMissing } from "./il78_sync_logic.js";
+import { gate as syncGate, planSync, collectNodes, mirrorVideo, suggestPrompt, applyPresetAudio, gateI2v, planSyncI2v, customAudioMissing, presetAlias } from "./il78_sync_logic.js";
 import { SHADOW_KEY, buildShadow, restoreFromShadow } from "./il78_shadow.js";
 
 const NODE_ALL = "IronLeo78_MTV_PromptGenerator";
@@ -449,17 +449,19 @@ function setup(node) {
       const mode = wm?.value === "i2v" ? "i2v" : "v2v";
       let j = null;
       try { j = await (await api.fetchApi("/ironleo78/mtv/presets")).json(); } catch (e) { /* a convenience */ }
+      // v0.6.0 (sweep M2): an old preset name not renamed yet (the silent rename is still on its way) is looked up under its new name
+      const pname = presetAlias(wp.value, j?.aliases) || wp.value;
       try {
         if (j && box) {
           const all = {};
           for (const [k, v] of Object.entries(j.presets || {})) all[`v2v|${k}`] = v;
           for (const [k, v] of Object.entries(j.i2v || {})) all[`i2v|${k}`] = v;
-          const next = suggestPrompt(box.value, all, `${mode}|${wp.value}`, true);      // v0.3.1: choosing a Preset always fills the example; v0.3.2: so does changing the Mode (the example of the other mode is shown)
+          const next = suggestPrompt(box.value, all, `${mode}|${pname}`, true);      // v0.3.1: choosing a Preset always fills the example; v0.3.2: so does changing the Mode (the example of the other mode is shown)
           if (next !== null) { box.value = next; box.callback?.(next); node.graph?.change?.(); app.canvas?.setDirty(true, true); }
         }
       } catch (e) { /* a convenience */ }
       try {
-        const info = { audio: j?.audio?.[wp.value] || "", stem: j?.stems?.[wp.value] || "" };
+        const info = { audio: j?.audio?.[pname] || "", stem: j?.stems?.[pname] || "" };
         const nodesNow = collectNodes(app.rootGraph || app.graph, node.graph);
         const prevAudio = node._il78Audio || node.properties?.il78_audio || null;      // v0.3.7: kept in the saved workflow, so it survives a reload
         node._il78Audio = applyPresetAudio(nodesNow, mode, info, prevAudio, !!fromMode);
@@ -545,6 +547,20 @@ app.registerExtension({
       }
       const r = onConfigure?.apply(this, arguments);
       this._il78?.refresh();
+      // v0.5.0: an old numbered preset name (saved before the presets were renamed "Category - Name") is shown under its new name.
+      // The value is set directly, WITHOUT the widget's callback, so the user's prompt is not replaced by the preset's example.
+      (async () => {
+        try {
+          const w = this.widgets?.find((x) => x.name === "Preset");
+          if (!w || !w.value || w.value === "None") return;
+          const j = await (await api.fetchApi("/ironleo78/mtv/presets")).json();
+          const next = presetAlias(w.value, j?.aliases, w.options?.values);      // v0.6.0 (M1): only to a name the list offers
+          if (next) {
+            w.value = next;
+            app.canvas?.setDirty(true, true);
+          }
+        } catch (e) { /* the backend translates old names too */ }
+      })();
       return r;
     };
     // v0.0.2d: every save carries the named copy

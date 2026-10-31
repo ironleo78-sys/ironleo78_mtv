@@ -44,6 +44,37 @@ export function collectNodes(...graphs) {
   return out;
 }
 
+// v0.5.0: the presets were renamed "Category - Name". A workflow saved before holds the old numbered name ("1 - Replace main actor"): the
+// new name when `value` is an old one (aliases = the presets route's "aliases" map), else null (nothing to change).
+// v0.6.0 (sweep M1): `options` = the combo's list; when given, the new name must be in it (never switch to a name that is not offered).
+export function presetAlias(value, aliases, options) {
+  if (!value || !aliases || typeof aliases !== "object") return null;
+  const next = aliases[value];
+  if (typeof next !== "string" || !next || next === value) return null;
+  if (Array.isArray(options) && !options.includes(next)) return null;
+  return next;
+}
+
+// v0.4.14 (sweep N2): the nodes that are really IN the workflow: the graph's own nodes and, through each subgraph NODE (`.subgraph`),
+// the nodes of the subgraphs actually placed. Unlike collectNodes it never reads a graph's `subgraphs` map, which can still hold the
+// definition of a subgraph whose last instance was deleted (an MTV in there would count as "still there" and the models never freed).
+export function liveNodes(graph) {
+  const out = [];
+  const seenGraphs = new Set();
+  const listOf = (g) => (Array.isArray(g?._nodes) ? g._nodes : Array.isArray(g?.nodes) ? g.nodes : []);
+  const walk = (g) => {
+    if (!g || typeof g !== "object" || seenGraphs.has(g)) return;
+    seenGraphs.add(g);
+    for (const n of listOf(g)) {
+      if (!n) continue;
+      out.push(n);
+      if (n.subgraph) walk(n.subgraph);
+    }
+  };
+  walk(graph);
+  return out;
+}
+
 // v0.1.12: "load the video once". When a video is picked / uploaded in one of the two nodes (the MTV's Video File or the
 // loader's video), the same file is put in the other kind of node. Only a real file is copied (never "None" / empty: removing a
 // video in one node leaves the other alone). Returns the nodes that were changed.

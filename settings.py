@@ -3,7 +3,7 @@
 from .consts import NONE_CHOICE
 
 
-VERSION = "0.4.8"
+VERSION = "0.6.3"
 
 PICTURE_INPUT = "Picture_{}"            # v0.0.9H: optional IMAGE sockets Picture_1 .. Picture_9 (the only way to give reference pictures; always on)
 NONE_LORA = NONE_CHOICE
@@ -82,7 +82,8 @@ MAX_SEED = 0xFFFFFFFFFFFFFFFF
 DEFAULT_SEED = 1978
 TURBO_STEPS = 6               # Turbo LoRA ON (4 until v0.1.10)
 FULL_STEPS = 30               # Turbo LoRA OFF (official r2v template path: no LoRA, more steps; 25 until v0.0.8, 40 until v0.1.10)
-DEFAULT_SAVE_LATENT = True    # the "Save Latent" toggle of a NEW node (v0.1.11: ON; OFF from v0.6 to 0.1.10)
+DEFAULT_SAVE_LATENT = False   # the "Save Latent" toggle of a NEW node (v0.6.2: OFF, the user's choice; ON from 0.1.11 to 0.6.1)
+DEFAULT_GUIDE = False         # the "Guide" toggle of a NEW node (v0.6.2: OFF, the user's choice; ON before)
 SAVE_LATENT_MISSING = False   # v0.1.11: a prompt that sends no "Save Latent" value at all (older than v0.6) still writes no latent files
 
 

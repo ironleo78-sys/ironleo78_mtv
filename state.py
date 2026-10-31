@@ -14,7 +14,7 @@ import torch
 from PIL import Image
 import folder_paths
 
-from .consts import NONE_CHOICE, SCENE_TAG, VIDEO_EXTS
+from .consts import NONE_CHOICE, SCENE_TAG, VIDEO_EXTS, _replace_retry
 from .naming import _manifest_path
 from .media_decode import _open_media
 
@@ -84,14 +84,17 @@ _STATE_LOCK = threading.RLock()
 
 
 def _load_state():
-    if os.path.exists(STATE_FILE):
-        try:
-            with open(STATE_FILE, encoding="utf-8") as f:
-                data = json.load(f)
-            return data if isinstance(data, dict) else {}
-        except Exception:
-            return {}
-    return {}
+    # v0.4.12 (sweep B1): reads take the lock too, so the panel's read (route thread) never holds the file open while a Run
+    # replaces it (Windows refuses to replace an open file). The lock is an RLock: a writer that already holds it reads freely.
+    with _STATE_LOCK:
+        if os.path.exists(STATE_FILE):
+            try:
+                with open(STATE_FILE, encoding="utf-8") as f:
+                    data = json.load(f)
+                return data if isinstance(data, dict) else {}
+            except Exception:
+                return {}
+        return {}
 
 
 def _write_state(state):
@@ -106,7 +109,7 @@ def _write_state(state):
                 f.flush()
                 with contextlib.suppress(OSError):
                     os.fsync(f.fileno())
-            os.replace(tmp, STATE_FILE)
+            _replace_retry(tmp, STATE_FILE)      # v0.4.12 (sweep B1): retried on a Windows "Access denied"
         except BaseException:
             with contextlib.suppress(OSError):
                 os.remove(tmp)
@@ -154,16 +157,37 @@ def _counter(state, key):
         return state, False
     songs = state.get(SONGS_STATE_KEY)
     if isinstance(songs, dict) and isinstance(songs.get(key), dict):
-        return songs[key], False
+        counter = songs[key]
+        # v0.4.13 (sweep O1): a counter remembers its file (size + date). Another file under the same name (a new video
+        # copied over the old one) starts from nothing instead of continuing the old file's position.
+        if FILE_FIELD in counter and counter[FILE_FIELD] != _file_fp(key):
+            return {}, False
+        return counter, False
     if not state.get("adopted") and (_to_int(state.get("index")) > 0 or _to_int(state.get("furthest")) > 0):
         return {k: state[k] for k in _COUNTER_FIELDS if k in state}, True
     return {}, False
+
+
+FILE_FIELD = "file"          # v0.4.13 (sweep O1): [size, mtime_ns] of the song / video a counter belongs to (None: no file)
+
+
+def _file_fp(key):
+    """v0.4.13 (sweep O1): [size, mtime in ns] of the input file behind a counter key ('audio:<name>' / 'video:<name>'),
+    None for the shared counter or a file that cannot be read."""
+    if not key or ":" not in key:
+        return None
+    try:
+        st = os.stat(folder_paths.get_annotated_filepath(key.split(":", 1)[1]))
+        return [int(st.st_size), int(st.st_mtime_ns)]
+    except Exception:
+        return None
 
 
 def _store_counter(state, key, counter, inherited):
     """Put a song's counter back into `state` (the shared one, key '', IS the state: nothing to do)."""
     if not key:
         return
+    counter[FILE_FIELD] = _file_fp(key)      # v0.4.13 (sweep O1)
     if not isinstance(state.get(SONGS_STATE_KEY), dict):
         state[SONGS_STATE_KEY] = {}
     state[SONGS_STATE_KEY][key] = counter
@@ -254,6 +278,42 @@ def _last_frame_file(key=""):
                         "mtv_last_frame_%s.png" % hashlib.sha1(key.encode("utf-8")).hexdigest()[:12])
 
 
+def _reset_on_new_version(current=None):
+    """v0.4.9: an update / reinstall starts the segment counters from scratch. The counters live outside the pack, so a reinstall
+    used to keep the old video's position and the next Run asked for frames past the end of the new one. The file records the
+    version that wrote it; another version (or none, from an older pack) = counters, furthest points and saved last frames
+    dropped, the new version recorded. Returns True when it reset."""
+    from .settings import VERSION
+    current = current or VERSION
+    with _STATE_LOCK:
+        state = _load_state()
+        if state.get("version") == current:
+            return False
+        # v0.4.13 (sweep O1): counters that know their file (written by 0.4.13 or later) are KEPT across an update: a file
+        # replaced under the same name is caught when the counter is read (_counter). Only counters from older versions,
+        # which cannot tell, are dropped as in 0.4.9.
+        songs = state.get(SONGS_STATE_KEY) if isinstance(state.get(SONGS_STATE_KEY), dict) else {}
+        old_counters = [c for c in songs.values() if isinstance(c, dict) and FILE_FIELD not in c]      # (the shared counter has no file: kept)
+        if not old_counters:
+            state["version"] = current
+            _write_state(state)
+            log.info("new version %s: segment counters kept (each one checks its own file)", current)
+            return False
+        for name in os.listdir(DATA_DIR) if os.path.isdir(DATA_DIR) else ():
+            if name.startswith("mtv_last_frame") and name.endswith(".png"):
+                with contextlib.suppress(OSError):
+                    os.remove(os.path.join(DATA_DIR, name))
+        _write_state({"index": 0, "version": current})
+    log.info("new version %s: segment counters start again at segment 1", current)
+    return True
+
+
+try:
+    _reset_on_new_version()
+except Exception as _e:         # never stop the pack from loading over this
+    log.warning("could not reset the segment counters: %s", _e)
+
+
 def _last_frame_of(images):
     """The last frame of a decoded video as a small CPU tensor [1,H,W,3] (so the video itself can be freed)."""
     return images[-1].detach().float().cpu().clamp(0, 1)[None].clone()
@@ -263,7 +323,15 @@ def _save_last_frame(frame, segment, key=""):
     """Keep the last frame of this run (it was segment number `segment`) for the Guide of the next run.
     v0.1.8: per counter (the song's own file and marker)."""
     arr = frame[0].numpy()
-    Image.fromarray((arr * 255.0 + 0.5).astype(np.uint8)).save(_last_frame_file(key))
+    path = _last_frame_file(key)
+    tmp = path + ".tmp"
+    try:      # v0.4.12 (sweep B7): written to a .tmp and swapped in, so a kill mid-write never leaves a truncated PNG behind
+        Image.fromarray((arr * 255.0 + 0.5).astype(np.uint8)).save(tmp, format="PNG")
+        _replace_retry(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.remove(tmp)
+        raise
     with _STATE_LOCK:          # v0.0.9l (the picture above is saved OUTSIDE the lock: only the file update is locked)
         state = _load_state()
         counter, inherited = _counter(state, key)
@@ -342,11 +410,14 @@ def _load_last_frame(index, song=None, key=""):
         return None, "first segment, nothing to continue from"
     path = _last_frame_file(key)
     if _counter(_load_state(), key)[0].get("guide_frame_for") == index - 1 and os.path.exists(path):
-        with Image.open(path) as opened:      # v0.0.9q: close the file now (an open handle can block the next overwrite on Windows)
-            img = opened.convert("RGB")
-        arr = np.array(img).astype(np.float32) / 255.0
-        return torch.from_numpy(arr)[None,], ""
-    if song is not None:
+        try:      # v0.4.12 (sweep B7): an unreadable saved frame falls through to the read-back below instead of failing the Run
+            with Image.open(path) as opened:      # v0.0.9q: close the file now (an open handle can block the next overwrite on Windows)
+                img = opened.convert("RGB")
+            arr = np.array(img).astype(np.float32) / 255.0
+            return torch.from_numpy(arr)[None,], ""
+        except Exception as e:
+            log.warning("The saved last frame %s could not be read (%s): trying the previous clip instead", path, e)
+    if song:      # v0.4.12 (sweep B6): no project name (pictures only) = no read-back: every such project shares one tag and folder
         try:
             clip = _clip_from_manifest(song, index - 1)
             arr = _clip_last_frame_array(clip) if clip else None

@@ -25,7 +25,7 @@
 //       0.5 or older still holds the old values: migrateMakerValues (below) drops the removed ones and maps the old switch
 //       (Latent Upscale OFF = the latents were saved) to Save Latent. The Model Loader lost "upscale_model_name" the same way
 //       (migrateLoaderValues).
-// IronLeo78 MTV (v0.4.8): segment panel (count, next, progress, Reset, Jump / Latest), always-visible
+// IronLeo78 MTV (v0.6.3): segment panel (count, next, progress, Reset, Jump / Latest), always-visible
 // (no picture thumbnails since v0.0.9H). (The status box at the bottom of the node is gone since v0.0.9: the report leaves on the
 // third output, `status` (STRING).)
 // The segment panel is the FIRST widget. It is display only: never
@@ -47,7 +47,7 @@
 
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
-import { mirrorVideo, collectNodes, useVideoAudio, normFile, PROMPT_GEN_NODE } from "./il78_sync_logic.js";
+import { mirrorVideo, collectNodes, liveNodes, useVideoAudio, normFile, PROMPT_GEN_NODE } from "./il78_sync_logic.js";
 
 // v0.0.6: ComfyUI's frontend stores a "preview" of every file picker (Video File; and picture_1..3 until v0.0.9H) in app.nodeOutputs and
 // draws it at the bottom of the node. With the picker on "None" that preview points at a file called "None": for the
@@ -968,7 +968,9 @@ app.registerExtension({
       // Delayed + re-checked, so loading another workflow that has the node does not unload anything.
       setTimeout(() => {
         try {
-          const stillThere = (app.graph?._nodes || []).some((n) => n.comfyClass === NODE_ID);
+          // v0.4.12 (sweep B5): subgraphs included (an MTV inside a subgraph still counts); v0.4.14 (sweep N2): only subgraphs that
+          // are really placed (liveNodes), not a leftover definition whose last instance was deleted
+          const stillThere = liveNodes(app.rootGraph || app.graph).some((n) => n && n.comfyClass === NODE_ID);
           if (!stillThere) {
             api.fetchApi(FREE_ROUTE, { method: "POST" }).catch(() => {});
           }

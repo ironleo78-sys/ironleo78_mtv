@@ -2,6 +2,101 @@
 
 All notable changes to **IronLeo78 MTV**. The version in `pyproject.toml` (Comfy Registry) is the same as the one shown on the MTV node.
 
+## v0.6.3
+
+- **The themed presets keep a fixed camera** (all Season, Weather, Holiday and Disaster presets). In video-to-video the camera is exactly the camera of your video, with no pan, zoom, orbit or extra cut added to show the snow, the storm or the comet; in image-to-video it is a still shot at the framing of Picture 1. The change happens inside the frame. Name a camera move in your prompt if you want one.
+
+## v0.6.2
+
+- **MTV: Save Latent and Guide are now OFF by default** on a new node (they were ON). Switch Save Latent ON for clips you may upscale later, and Guide ON for clips that should continue each other. Saved workflows keep their own values.
+
+## v0.6.1
+
+- **Prompt Generator: `Video_Size` now defaults to 512x288** (was 672x384) on a new node. Workflows you already saved keep the size they were saved with.
+
+## v0.6.0
+
+Fixes from the sweep of 0.5.0 / 0.5.1 (the preset renaming).
+
+- **A personal preset file that still has its old name is no longer renamed in the UI to a name that is not in the list.** The Prompt Generator now switches an old saved preset name to its new one only when that new preset really exists (and the old file does not); the node keeps showing and using your file under the name it has. Before, its Custom Audio / Full stem settings would not have been applied after reloading a workflow.
+- **The prompt example and the musician settings use the new name right away** when a workflow with an old preset name has just loaded, instead of finding nothing until the silent rename was done.
+- Tests: they pass whether the personal preset file is still called "12 - IronLeo78 Mode" or already "Personal - IronLeo78 Mode".
+
+## v0.5.1
+
+- **Presets that don't swap anyone now keep the original actors.** In 41 presets (seasons, weather, holidays, disasters, looks, camera, cast, stage, FX, story, Swap - Prop and the outfit swaps), the LLM must describe EACH person of the video in full detail (face, age, skin, hair, build, every garment) and keep them identical in every shot; nobody is re-cast or made generic. Until now most new presets only "named the people briefly", and MiniMax then invented new people.
+- **And their performance:** in the video-to-video version the actors keep their acting, expressions, gestures, movement, positions and lip-sync frame for frame; only what is not the characters changes (clothing too, in the costume and outfit presets). Exceptions by design: Performance - Acting retake (it changes the acting) and Story - Continue the scene (new action after the video).
+- Presets that replace a person (the Swap actor presets, the Musician presets, Motion transfer, Storyboard shots, your Personal preset) and Swap - Environment only (it already had its own rule) are unchanged.
+
+## v0.5.0
+
+- **Presets are now named `Category - Name` and sorted alphabetically,** so each family sits together: Camera, Cast, Disaster, FX, Holiday, Look, Musician, Performance, Season, Stage, Story, Swap, Weather (and Personal). For example "1 - Replace main actor" is now **Swap - Main actor** and "8 - Drummer performance" is **Musician - Drummer**. **Saved workflows keep working:** an old numbered name is translated by the node (and shown under its new name in the Prompt Generator, without touching your prompt).
+- **27 new presets (52 in all):**
+  - **Season** - Spring, Summer, Autumn, Winter.
+  - **Weather** - Rain, Snow, Fog.
+  - **Holiday** - Halloween night, Halloween costumes, Christmas decorations, Christmas costumes, Christmas night sky.
+  - **Disaster** - Tornado, Comet impact, Volcano eruption, Tsunami wave, Earthquake, Meteor shower, Wildfire, Lightning storm, Flood, Sandstorm, Avalanche, City blackout, Alien mothership, Giant monster, Building collapse. Dramatic and mostly in the background: every Disaster preset has a hard rule that the main characters are never touched or hurt, and keep their performance and lip-sync.
+  - Like the other scene presets, they keep the people, the camera, the lip-sync and the video's audio, and have a video-to-video and an image-to-video version with a suggested prompt. They are new: try them live and keep the ones that work.
+- **Your personal preset** is now named "Personal - IronLeo78 Mode". If you still have it under its old name ("12 - IronLeo78 Mode.md"), it keeps working; rename the file when you like.
+
+## v0.4.17
+
+- **Twelve new presets for retakes (13 to 24), for music videos and cinema.** Shoot the same scene again with one thing changed: **13** Camera retake, **14** Acting retake, **15** Film look and era, **16** Storyboard shots, **17** Continue the scene, **18** First and last frame, **19** Prop swap, **20** Add a character, **21** Motion transfer, **22** Concert stage, **23** Visual effects, **24** Clone performer. Each has a video-to-video and an image-to-video version and a suggested prompt, and follows the MiniMax guide's task types (video editing, keyframe completion, video continuation, storyboard references, appearance from one picture with the motion of the video). They are new: try them live and keep the ones that work.
+- None of them changes the MTV's audio settings (unlike the musician presets).
+
+## v0.4.16
+
+- **Status line:** "total frames" now uses the video picture's own length, the same one the segment panel counts with (since 0.4.12), so the two no longer disagree on files whose soundtrack runs longer than the picture.
+- README: how the segment counters behave across updates and when a file is replaced or uploaded again.
+- Tests: the Prompt Generator checks that a missing LLM file fails before any video decode and that the pack's busy flag is set while it runs.
+
+## v0.4.15
+
+- **Faster page loads with the 2in1 Revitalizer.** Its latent and conditioning lists used to walk the whole ComfyUI output folder twice every time ComfyUI loaded its node list (page load, the R button). Now one walk fills both lists and is reused for 2 seconds; an upload refreshes them at once. A clip the MTV just saved shows in the lists after at most 2 seconds (press R).
+
+## v0.4.14
+
+Three small fixes from the 0.4.13 sweep. No widget was added, moved or renamed: saved workflows load as before, and the segment counters are kept (0.4.13).
+
+- **Go / Reset in the segment panel** now do their file work in a background thread, like the segment count already did, so ComfyUI's web server never waits on them.
+- **Deleting the last MTV frees the models again even if an MTV once sat in a subgraph.** The check now counts only subgraphs that are really placed in the workflow, not a leftover subgraph definition.
+- **Revitalizer Upload:** a file that is not a `.latent` / `.conditioning` (a video dropped by mistake) is skipped without being read into memory.
+
+## v0.4.13
+
+Optimisations from the 0.4.11 sweep. No widget was added, moved or renamed: saved workflows load as before.
+
+- **Updates keep your place.** Each segment counter now remembers its song or video file (size and date). An update no longer resets the counters; a counter starts again at segment 1 only when another file was copied over the old one under the same name (the case 0.4.9 was about). Counters saved before 0.4.13 cannot tell, so they are reset once with this update, as before.
+- **One copy of each VAE in RAM.** The MTV and the 2in1 Revitalizer used to keep their own loaded video VAE and audio VAE; they now share one copy of each.
+- **Prompt Generator:** a missing LLM file is reported at once, before the video is decoded. Its console lines now go through the pack's logger (`IronLeo78.MTV`) like the rest of the pack.
+- Code only: unused imports removed from `mtv.py`; the Model Loader imports its constants from the modules that define them.
+
+## v0.4.12
+
+Fixes from the 0.4.11 bug sweep. No widget was added, moved or renamed: saved workflows load as before. As with every new version since 0.4.9, the segment counters start again at segment 1 after the update.
+
+- **A finished clip is no longer lost when the segment counter cannot be saved (Windows).** Saving the counter is the last step of a Run. On Windows it could fail with "Access denied" while the segment panel was reading the file or an antivirus was scanning it, and the error then failed the whole node after the clip was made. The save is now retried, the panel's read waits for it, and if it still fails the clip leaves normally: the status says the counter did not move and that Go in the segment panel moves on. The Model Loader's Set New Defaults file is saved the same way.
+- **Deleting the last MTV node no longer unloads models under a running Revitalizer or Prompt Generator.** The unload now waits while any node of the pack runs, and an MTV inside a subgraph counts as still there.
+- **The Guide's saved last frame is written safely.** It is written to a temporary file first, and a damaged one no longer stops the next Run (the previous clip is used instead, as after a jump).
+- **Pictures-only projects (no song, no video) no longer borrow another project's last frame.** They all share one name, so after a jump / redo the Guide skips the read-back from a saved clip for them.
+- **Segment count of a video whose soundtrack runs longer than the picture.** The panel used the file's longest stream and could count one segment too many. It now uses the picture's own length (and, for Use Video OFF + Audio From Video, the soundtrack's own length).
+- Changelog: the duplicated v0.4.9 to v0.4.11 entries at the top of this file were cleaned up. README: the "Tested" line no longer names an old version.
+- Correction to the 0.4.0 entry: toggling **Keep LLM in RAM** does re-run the Prompt Generator once (ComfyUI re-runs a node when any of its widgets changes); only the comment in the code claimed otherwise.
+- Tests: the preset count and timeline checks updated for preset 6b, the `;` lines split, and a new section for the fixes above. The package now also leaves out the files the node writes into its own folder (`.comfyignore`).
+
+## v0.4.11
+
+- **New preset `6b - Outfit and Pose Swap`**, listed right under Outfit swap. Like Outfit swap, but the actor also takes the POSE of Picture 1 (stance, arms, hands, head angle, attitude) and holds it through the shots, while keeping their own face, the place, the camera, the lip-sync and the audio. Image-to-video: the person of Picture 1 gets the outfit and the pose of Picture 2.
+- The preset list sorts `6b` right after `6` (a number followed by one letter); existing preset names are unchanged, so saved workflows keep working.
+
+## v0.4.10
+
+- **Preset 6 (Outfit swap) no longer copies the pose of Picture 1.** In video-to-video the LLM sometimes gave half the scene the pose, stance and expression of the person wearing the outfit in Picture 1. The preset now says to take the garments only (as if laid flat), forbids the pose, background and camera of Picture 1, and requires the actor to keep the pose and movement of Video 1 in every shot (new rule 9). The image-to-video text got the same clarification.
+
+## v0.4.9
+
+- **Update / reinstall now starts the segment counters again.** The counters live in `ComfyUI/user/ironleo78_mtv/mtv_state.json`, outside the pack, so a reinstall kept the old video's position and the next Run asked for frames past the end of the new video. The file now records the pack version; a different version resets every counter and removes the saved last frames (logged in the console).
+
 ## v0.4.8
 
 ### Code only: the HTTP routes moved out of `mtv.py` (sweep item S2, block 3)

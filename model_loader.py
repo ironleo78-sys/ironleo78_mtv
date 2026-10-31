@@ -32,10 +32,14 @@ models. Several MTVs can share one Model Loader.
 
 import folder_paths
 
-from .mtv import (
+# v0.4.13 (sweep O5): imported from the modules that define them (mtv.py no longer re-exports every name)
+from .settings import (
     DEFAULT_CUSTOM_LORA, DEFAULT_CUSTOM_LORA_STR, DEFAULT_TURBO_LORA_STR, NONE_LORA, LORA_SLOTS, DEFAULT_SEED, MAX_SEED, TURBO_STEPS, FULL_STEPS, MIN_STEPS, MAX_STEPS, MODELS_TYPE,
-    MODEL_FILE_KEYS, NONE_CHOICE, _vae_options, loader_defaults,
+    MODEL_FILE_KEYS,
 )
+from .consts import NONE_CHOICE
+from .core_call import _vae_options
+from .defaults import loader_defaults
 
 
 def _choices(names, wanted):

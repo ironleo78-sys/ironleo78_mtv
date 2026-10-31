@@ -4,7 +4,7 @@ import json
 import os
 import folder_paths
 
-from .consts import NONE_CHOICE, _truthy
+from .consts import NONE_CHOICE, _replace_retry, _truthy
 from .core_call import _vae_options
 from .settings import (DEFAULT_SEED, FIXED_SETTINGS, LORA_SLOTS, MAX_SEED, MAX_STEPS, MIN_STEPS, MODEL_FILE_KEYS, MODEL_STEP_KEYS,
                        NONE_LORA, SEED_CONTROLS, VERSION)
@@ -148,7 +148,7 @@ def save_user_defaults(values, seed_control=None):
             if seed_control is not None:
                 data["seed_control"] = seed_control
             json.dump(data, f, indent=2)
-        os.replace(tmp, DEFAULTS_FILE)
+        _replace_retry(tmp, DEFAULTS_FILE)      # v0.4.12 (sweep B1): retried on a Windows "Access denied"
     except OSError as e:
         return {}, f"could not write {os.path.basename(DEFAULTS_FILE)}: {e}"
     return clean, None

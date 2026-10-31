@@ -30,6 +30,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PACK = os.path.dirname(HERE)
 sys.path.insert(0, os.path.dirname(PACK))
 pack = importlib.import_module(os.path.basename(PACK) + ".nine_images")      # v0.1.0: inside the MTV pack
+OLD = {k.split(" ", 1)[0]: v for k, v in pack.PRESET_ALIASES.items()}      # v0.5.0: old preset number -> its new "Category - Name"
+if not os.path.isfile(pack._preset_path(OLD["12"])) and os.path.isfile(pack._preset_path("12 - IronLeo78 Mode")):
+    OLD["12"] = "12 - IronLeo78 Mode"      # v0.6.0 (M3): the user's own copy may still have its old name (it works under both)
 
 
 def img(h, w, v):
@@ -223,9 +226,9 @@ class PresetTests(unittest.TestCase):
             self.assertTrue(sp[n].strip(), "preset %r has no # PROMPT" % n)
             s, t = pack._read_preset(n)
             self.assertNotIn(sp[n], s + t)
-        self.assertEqual(sp[names[0]], "Replace the main character of Video 1.")
-        self.assertEqual(sp[names[1]], "Replace the main character and the environment of Video 1.")
-        self.assertEqual(sp[names[2]], "Replace the two characters and the environment of Video 1.")
+        self.assertEqual(sp[OLD["1"]], "Replace the main character of Video 1.")
+        self.assertEqual(sp[OLD["2"]], "Replace the main character and the environment of Video 1.")
+        self.assertEqual(sp[OLD["3"]], "Replace the two characters and the environment of Video 1.")
 
     def test_every_shipped_preset_has_an_i2v_version(self):
         sp = pack.preset_prompts("i2v")
@@ -243,24 +246,35 @@ class PresetTests(unittest.TestCase):
             self.assertNotEqual((s, t), pack._read_preset(n, "v2v"))
             self.assertNotEqual(sp[n], pack.preset_prompts()[n])
         names = pack._preset_names()
-        self.assertIn("<Picture 2> is the REPLACEMENT CHARACTER", pack._read_preset(names[0], "i2v")[0])       # roles shift up one slot
-        s3 = pack._read_preset(names[2], "i2v")[0]
+        self.assertIn("<Picture 2> is the REPLACEMENT CHARACTER", pack._read_preset(OLD["1"], "i2v")[0])       # roles shift up one slot
+        s3 = pack._read_preset(OLD["3"], "i2v")[0]
         for key in ("<Picture 4>", "GENDER MATCHING", "MATCH BY GENDER", "is the SECONDARY ACTOR"):
             self.assertIn(key, s3)
 
     def test_all_presets_share_the_same_timeline_rules(self):
         import re
         names = pack._preset_names()
-        base_v = re.search(r"8\. Timing \(mandatory\).*?(?=\n9\. )", pack._read_preset(names[0])[0], re.S).group(0)
-        base_i = re.search(r"8\. Timeline \(mandatory\).*?(?=\n9\. )", pack._read_preset(names[0], "i2v")[0], re.S).group(0)
+        base_v = re.search(r"8\. Timing \(mandatory\).*?(?=\n9\. )", pack._read_preset(OLD["1"])[0], re.S).group(0)
+        base_i = re.search(r"8\. Timeline \(mandatory\).*?(?=\n9\. )", pack._read_preset(OLD["1"], "i2v")[0], re.S).group(0)
+        # presets whose rule 8 has its own wording on purpose: name -> (phrase in the v2v rule 8, phrase in the i2v one or None = shared)
+        own_rule_8 = {OLD["6b"]: ("small movement", "small movement"),      # v0.4.12: 6b holds the pose of Picture 1
+                      OLD["17"]: ("right after the last frame of <Video 1>", None)}      # v0.4.17: the new clip FOLLOWS the source
         for n in names:
             v = re.search(r"8\. Timing \(mandatory\).*?(?=\n9\. )", pack._read_preset(n)[0], re.S)
             i = re.search(r"8\. Timeline \(mandatory\).*?(?=\n9\. )", pack._read_preset(n, "i2v")[0], re.S)
-            self.assertTrue(v and v.group(0) == base_v, "v2v rule 8 differs in %r" % n)
-            self.assertTrue(i and i.group(0) == base_i, "i2v rule 8 differs in %r" % n)
+            self.assertTrue(v and i, "rule 8 missing in %r" % n)
+            own_v, own_i = own_rule_8.get(n, (None, None))
+            if own_v:
+                self.assertIn(own_v, v.group(0))
+            else:
+                self.assertTrue(v.group(0) == base_v, "v2v rule 8 differs in %r" % n)
+            if own_i:
+                self.assertIn(own_i, i.group(0))
+            else:
+                self.assertTrue(i.group(0) == base_i, "i2v rule 8 differs in %r" % n)
 
     def test_the_new_presets_follow_the_guide(self):
-        names = {n.split(" ", 1)[0]: n for n in pack._preset_names()}
+        names = OLD
         for k in ("4", "5", "6", "11"):                                                   # the video keeps its own audio
             s = pack._read_preset(names[k])[0]
             self.assertIn("[video editing + reference generation + audio reuse]", s)
@@ -282,9 +296,136 @@ class PresetTests(unittest.TestCase):
             self.assertIn("<Picture 2> is the", si)
             self.assertIn("`[reference generation + audio reuse]`", si)
 
+    def test_cinema_presets_13_to_24(self):
+        # v0.4.17: twelve presets for retakes (music video + cinema), each with the task type the guide gives its job
+        names = OLD
+        v2v_types = {"13": "[video editing + reference generation + audio reuse]", "14": "[video editing + reference generation + audio reuse]",
+                     "15": "[video editing + reference generation + audio reuse]", "16": "[reference generation]",
+                     "17": "[video continuation]", "18": "[video editing + keyframe completion + reference generation + audio reuse]",
+                     "19": "[video editing + reference generation + audio reuse]", "20": "[video editing + reference generation + audio reuse]",
+                     "21": "[reference generation]", "22": "[video editing + reference generation + audio reuse]",
+                     "23": "[video editing + reference generation + audio reuse]", "24": "[video editing + reference generation + audio reuse]"}
+        info = pack.preset_audio_info()
+        for k, kind in v2v_types.items():
+            s, t = pack._read_preset(names[k])
+            si, ti = pack._read_preset(names[k], "i2v")
+            self.assertIn("`%s`" % kind, s, k)
+            self.assertTrue(s.startswith("PRESET "), k)
+            self.assertTrue(t.rstrip().endswith(":") and ti.rstrip().endswith(":"), k)
+            for text in (s, si):
+                self.assertNotIn("{", text)                                             # no unfilled template field
+                self.assertIn("9. If the request of the user adds a detail", text)
+            if "audio reuse" in kind:                                                   # the edited video keeps its own sound
+                self.assertIn("synchronized audio track of <Video 1>", s)
+                self.assertIn("`fully_copy`", s)
+            else:                                                                       # the sound comes from the MTV
+                self.assertIn("the audio is chosen in the MTV", s)
+            self.assertEqual(info[names[k]], {"audio": "", "stem": ""})                 # none of them changes the MTV's audio settings
+        self.assertIn("storyboard reference for [Shot N]", pack._read_preset(names["16"])[0])
+        self.assertIn("is the last frame of the final shot", pack._read_preset(names["18"])[0])
+        self.assertIn("`[reference generation + keyframe completion]`", pack._read_preset(names["18"], "i2v")[0])
+        self.assertIn("the appearance from one asset, the motion from another", pack._read_preset(names["21"])[0])
+        self.assertIn("`attribute_transfer`", pack._read_preset(names["19"])[0])
+
+    def test_video_size_default(self):
+        # v0.6.1: a NEW Prompt Generator starts at 512x288 (saved workflows keep their own value: the widget did not move)
+        req = pack.IronLeo78_9ImagesToBatchToLLM.INPUT_TYPES()["required"]
+        self.assertEqual(req["Video_Size"][1]["default"], "512x288")
+        self.assertIn("512x288", req["Video_Size"][0])
+
+    def test_old_preset_names_still_work(self):
+        # v0.5.0: a workflow or API prompt saved before the rename still runs: every old numbered name resolves to its renamed file
+        V = pack.IronLeo78_9ImagesToBatchToLLM.VALIDATE_INPUTS
+        self.assertEqual(len(pack.PRESET_ALIASES), 25)
+        for old, new in pack.PRESET_ALIASES.items():
+            if old == "12 - IronLeo78 Mode" and os.path.isfile(pack._preset_path(old)):      # v0.6.0 (M3): not renamed yet on this machine
+                self.assertEqual(pack.resolve_preset(new), old)
+                self.assertNotIn(old, pack.effective_aliases())                         # (M1) the UI is never told to rename it
+                continue
+            self.assertTrue(os.path.isfile(pack._preset_path(new)), new)
+            self.assertFalse(os.path.isfile(pack._preset_path(old)), old)                # the old files are gone
+            self.assertEqual(pack.resolve_preset(old), new)
+            self.assertEqual(pack.effective_aliases()[old], new)
+            self.assertEqual(pack._read_preset(old), pack._read_preset(new))
+            self.assertEqual(pack._read_preset(old, "i2v"), pack._read_preset(new, "i2v"))
+            self.assertIs(V(Preset=old), True)
+            self.assertIs(V(Preset=new), True)
+        self.assertIs(V(Preset="None"), True)
+        self.assertIn("not found", V(Preset="99 - Nothing"))
+        self.assertEqual(pack.resolve_preset("99 - Nothing"), "99 - Nothing")
+        IC = pack.IronLeo78_9ImagesToBatchToLLM.IS_CHANGED
+        base = dict(Start_From=0, Duration=5, Frame_Interval="12", Video_Size="672x384", video="")
+        self.assertNotEqual(IC(**base, Preset="1 - Replace main actor"), IC(**base, Preset="None"))     # the old name hashes the renamed file
+
+    def test_world_presets(self):
+        # v0.5.0: seasons, weather, holidays and disasters: the world changes, the people, camera, lip-sync and audio stay
+        names = pack._preset_names()
+        for n in ("Season - Spring", "Season - Summer", "Season - Autumn", "Season - Winter", "Weather - Rain", "Weather - Snow",
+                  "Weather - Fog", "Holiday - Halloween night", "Holiday - Halloween costumes", "Holiday - Christmas decorations",
+                  "Holiday - Christmas costumes", "Holiday - Christmas night sky"):
+            self.assertIn(n, names)
+        disasters = [n for n in names if n.startswith("Disaster - ")]
+        self.assertEqual(len(disasters), 15)
+        info = pack.preset_audio_info()
+        for n in [n for n in names if n.split(" - ")[0] in ("Season", "Weather", "Holiday", "Disaster")]:
+            s, t = pack._read_preset(n)
+            si, ti = pack._read_preset(n, "i2v")
+            self.assertIn("[video editing + reference generation + audio reuse]", s, n)
+            self.assertIn("`fully_copy`", s, n)
+            self.assertTrue(t.rstrip().endswith(":") and ti.rstrip().endswith(":"), n)
+            self.assertNotIn("{", s + si, n)
+            self.assertEqual(info[n], {"audio": "", "stem": ""}, n)
+        for n in disasters:                                                             # dramatic, never hurting the main characters
+            for text in pack._read_preset(n)[0], pack._read_preset(n, "i2v")[0]:
+                self.assertIn("SAFETY OF THE MAIN CHARACTERS (mandatory)", text, n)
+                self.assertIn("never touches, hits, burns, buries, injures or endangers the main characters", text, n)
+        for n in ("Holiday - Halloween costumes", "Holiday - Christmas costumes"):    # costumes change the clothing, never the person
+            self.assertIn("only the clothing changes into the costume", pack._read_preset(n)[0])
+        self.assertIn("never gory", pack._read_preset("Holiday - Halloween night")[0])
+
+    def test_presets_that_do_not_swap_people_keep_the_original_actors(self):
+        # v0.5.1: every preset that does not replace a person keeps the ORIGINAL actors (identity + look) in both versions, and, in
+        # video-to-video, their acting, gestures, positions and lip-sync frame for frame (clothing presets: only the clothing changes)
+        swaps = {"Swap - Main actor", "Swap - Main actor and environment", "Swap - Two actors and environment", "Musician - Singer",
+                 "Musician - Drummer", "Musician - Bassist", "Musician - Guitarist", "Personal - IronLeo78 Mode",
+                 "Performance - Motion transfer", "Camera - Storyboard shots", "12 - IronLeo78 Mode",
+                 "Swap - Environment only"}                                             # (Environment only has its own tested People rule)
+        new_action = {"Performance - Acting retake", "Story - Continue the scene"}      # the performance itself is what they change
+        clothes = {"Holiday - Halloween costumes", "Holiday - Christmas costumes", "Swap - Outfit"}
+        kept = [n for n in pack._preset_names() if n not in swaps]
+        self.assertEqual(len(kept), 41)
+        for n in kept:
+            s = pack._read_preset(n)[0]
+            si = pack._read_preset(n, "i2v")[0]
+            self.assertIn("ACTORS (mandatory", s, n)
+            self.assertIn("ACTORS (mandatory", si, n)
+            self.assertIn("the people of <Video 1> are the ORIGINAL ACTORS", s, n)
+            self.assertIn("the people of <Picture 1> are the ORIGINAL ACTORS", si, n)
+            self.assertNotIn("name them briefly", s + si, n)
+            if n in new_action:
+                self.assertNotIn("Their performance also stays", s, n)
+            else:
+                self.assertIn("mouth movement (lip-sync)", s, n)
+            if n in clothes:
+                self.assertIn("except their clothing, which this preset changes", s, n)
+        self.assertIn("People: nobody is replaced and nobody changes", pack._read_preset("Swap - Environment only")[0])
+
+    def test_themed_presets_keep_a_fixed_camera(self):
+        # v0.6.3: Season / Weather / Holiday / Disaster presets do not move the camera to show their change (the user: "the themed
+        # presets shift the camera a lot, make them fixed camera by default"); only a camera move named in the request is allowed
+        themed = [n for n in pack._preset_names() if n.split(" - ")[0] in ("Season", "Weather", "Holiday", "Disaster")]
+        self.assertEqual(len(themed), 28)
+        for n in themed:
+            s, si = pack._read_preset(n)[0], pack._read_preset(n, "i2v")[0]
+            self.assertIn("CAMERA (mandatory): the camera is FIXED to the camera of <Video 1>", s, n)
+            self.assertIn("CAMERA (mandatory): the camera is LOCKED OFF at the framing of <Picture 1>", si, n)
+            self.assertIn("Only a camera move named in the request of the user may be added", s, n)
+        for n in ("Camera - Retake with a new move", "Story - Continue the scene"):    # presets whose job is a camera / story change
+            self.assertNotIn("CAMERA (mandatory)", pack._read_preset(n)[0], n)
+
     def test_ironleo78_mode(self):
-        names = {n.split(" ", 1)[0]: n for n in pack._preset_names()}
-        self.assertEqual(names["12"], "12 - IronLeo78 Mode")
+        names = OLD
+        self.assertIn(names["12"], ("Personal - IronLeo78 Mode", "12 - IronLeo78 Mode"))      # v0.6.0 (M3): either file name
         s, t = pack._read_preset(names["12"])
         si, ti = pack._read_preset(names["12"], "i2v")
         for text in (s, si):
@@ -300,12 +441,13 @@ class PresetTests(unittest.TestCase):
         self.assertIn("<Picture 1>, when it is listed, is a photo of the DAUGHTER", s)           # v2v: no scene picture
         self.assertTrue(t.rstrip().endswith(":") and ti.rstrip().endswith(":"))
         sp, spi = pack.preset_prompts(), pack.preset_prompts("i2v")
-        self.assertIn("daughter", sp[names["12"]]); self.assertIn("daughter", spi[names["12"]])
+        self.assertIn("daughter", sp[names["12"]])
+        self.assertIn("daughter", spi[names["12"]])
         self.assertNotEqual(sp[names["12"]], spi[names["12"]])
 
     def test_musician_presets_set_the_mtv_stem_and_audio(self):
         info = pack.preset_audio_info()
-        names = {n.split(" ", 1)[0]: n for n in pack._preset_names()}
+        names = OLD
         self.assertEqual(info["None"], {"audio": "", "stem": ""})
         for k, stem in (("7", "Vocals"), ("8", "Drums"), ("9", "Bass"), ("10", "Guitars")):
             self.assertEqual(info[names[k]], {"audio": "Custom Audio", "stem": stem})
@@ -364,14 +506,20 @@ class PresetTests(unittest.TestCase):
 
     def test_shipped_presets(self):
         names = pack._preset_names()
-        self.assertEqual(len(names), 12)                                               # v0.3.0: 3 actor presets + 8 more; v0.3.3: + IronLeo78 Mode
-        self.assertEqual([n.split(" ", 1)[0] for n in names], [str(i) for i in range(1, 13)])      # natural order: 10, 11 and 12 come after 9
-        self.assertTrue(names[0].startswith("1 - ") and names[1].startswith("2 - ") and names[2].startswith("3 - "))
+        self.assertEqual(len(names), 52)                                               # v0.5.0: 25 renamed + 27 new (max 60)
+        self.assertLessEqual(len(names), 60)
+        listed = names                                                                 # what the node really offers
+        names = [n for n in names if n != "12 - IronLeo78 Mode"] + (["Personal - IronLeo78 Mode"] if "12 - IronLeo78 Mode" in names else [])
+        names = sorted(names, key=str.lower)                                           # (v0.6.0 M3: the personal file under its old name counts as renamed)
+        self.assertEqual(names, sorted(names, key=str.lower))                          # v0.5.0: alphabetical, so each category is grouped
+        cats = {"Camera", "Cast", "Disaster", "FX", "Holiday", "Look", "Musician", "Performance", "Personal", "Season", "Stage", "Story", "Swap", "Weather"}
+        self.assertTrue(all(" - " in n and n.split(" - ", 1)[0] in cats for n in names), names)
+        self.assertEqual((OLD["1"], OLD["2"], OLD["3"]), ("Swap - Main actor", "Swap - Main actor and environment", "Swap - Two actors and environment"))
         req = pack.IronLeo78_9ImagesToBatchToLLM.INPUT_TYPES()["required"]
-        self.assertEqual(req["Preset"][0], ["None"] + names)
+        self.assertEqual(req["Preset"][0], ["None"] + listed)
         self.assertEqual(req["Preset"][1]["default"], "None")
-        s1, t1 = pack._read_preset(names[0])
-        s2, t2 = pack._read_preset(names[1])
+        s1, t1 = pack._read_preset(OLD["1"])
+        s2, t2 = pack._read_preset(OLD["2"])
         self.assertTrue(s1 and t1 and s2 and t2)
         for key in ("<Picture 1>", "<Video 1>", "attribute_transfer", "video editing", "fully_copy", "At MM:SS.mmm", "TIMELINE"):
             self.assertIn(key, s1)
@@ -381,14 +529,14 @@ class PresetTests(unittest.TestCase):
         for key in ("<Picture 2>", "environment", "attribute_transfer", "fully_preserved", "fully_copy", "TIMELINE", "At MM:SS.mmm",
                     "[video editing + reference generation + audio reuse]", "<Subject 2>"):
             self.assertIn(key, s2)
-        self.assertIn("Preset 2", t2)
+        self.assertTrue(t2.startswith("Preset "))
         self.assertTrue(t2.rstrip().endswith(":"))
         self.assertNotEqual(s1, s2)
         rule8 = lambda s: s[s.index("8. Timing (mandatory)"):s.index("9. If the request")]
         self.assertEqual(rule8(s1), rule8(s2))                                # the same timeline rule in both
-        self.assertNotIn("Placeholder", names[1])
+        self.assertNotIn("Placeholder", OLD["2"])
         # v0.2.0: preset 3 = two actors + environment, matched BY GENDER, same guide rules and the same timeline rule
-        s3, t3 = pack._read_preset(names[2])
+        s3, t3 = pack._read_preset(OLD["3"])
         for key in ("<Picture 1>", "<Picture 2>", "<Picture 3>", "<Subject 4>", "GENDER MATCHING", "MATCH BY GENDER", "no matter which person",
                     "attribute_transfer", "fully_preserved", "fully_copy", "TIMELINE", "[video editing + reference generation + audio reuse]",
                     "ORDER of the vocal events", "explicitly"):

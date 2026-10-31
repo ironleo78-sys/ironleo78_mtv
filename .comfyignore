@@ -1,3 +1,9 @@
 # kept in git, left out of the Comfy Registry package
 tests/
 presets/12 - IronLeo78 Mode.md
+presets/Personal - IronLeo78 Mode.md      # v0.5.0: its new name
+# v0.4.12: files the node or the tests write into the pack folder (never part of the package)
+mtv_state.json
+mtv_state.json.tmp
+mtv_last_frame*.png
+mtv_defaults.json

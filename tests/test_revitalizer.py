@@ -105,6 +105,7 @@ os.makedirs(up)
 for n in ("U_seg009_A_00001_video.latent", "U_seg009_A_00001_audio.latent", "U_seg009_A_00001.conditioning"):
     open(os.path.join(up, n), "wb").write(b"x")
 U = rv.UPLOAD_TAG + "U_seg009_A_00001_video.latent"
+rv.forget_entries()      # v0.4.15: files written here directly (the upload route clears the 2 s listing reuse itself)
 check(U in N.INPUT_TYPES()["required"]["latent"][0] and V(latent=U) is True, "an uploaded clip is listed and valid")
 check(rv.locate(U) == os.path.join(up, "U_seg009_A_00001_video.latent"), "the tag maps to input/ironleo78_revitalizer/")
 check(rv.clean_upload_name("C:\\x\\a_video.latent") == "a_video.latent" and rv.clean_upload_name("a.conditioning") == "a.conditioning", ".latent / .conditioning names reduced to the file name")
@@ -388,8 +389,8 @@ check(len(rv._CACHE["model"]) == 1 and len(rv._CACHE["vae"]) <= 2, "never more t
 rv.free_cache()
 calls.clear()
 run(**args)
-check(count("UNETLoader") == 0 and count("Attn") == 1 and count("VAELoader") == 2,
-      "after the Revitalizer's own free_cache(): its chain and VAEs load again, the shared model file stays in memory")
+check(count("UNETLoader") == 0 and count("Attn") == 1 and count("VAELoader") == 0,
+      "after the Revitalizer's own free_cache(): its chain is built again; the shared model file and (v0.4.13) the shared VAEs stay in memory")
 rv.free_cache()
 mc.free()
 calls.clear()
@@ -488,5 +489,66 @@ check(good and not os.path.exists(target2) and not os.path.exists(target2 + ".tm
       "an upload that breaks off: the error is reported, and no half-written file or .tmp stays behind")
 asyncio.run(rv.save_upload_part(_Part([b"new"]), target))
 check(open(target, "rb").read() == b"new", "uploading the same name again replaces the file")
+
+# v0.4.14 (sweep N4): a refused upload is released, never read into memory
+_handlers14 = {}
+class _Routes14:
+    def get(self, path):
+        return lambda fn: _handlers14.__setitem__(("GET", path), fn) or fn
+    def post(self, path):
+        return lambda fn: _handlers14.__setitem__(("POST", path), fn) or fn
+_srv14 = types.ModuleType("server")
+_srv14.PromptServer = types.SimpleNamespace(instance=types.SimpleNamespace(routes=_Routes14()))
+_old14 = sys.modules.get("server")
+sys.modules["server"] = _srv14
+try:
+    rv._register_routes()
+finally:
+    if _old14 is None:
+        sys.modules.pop("server", None)
+    else:
+        sys.modules["server"] = _old14
+_log14 = []
+class _UpPart:
+    def __init__(self, filename, data):
+        self.filename, self._chunks = filename, [data]
+    async def read(self):
+        _log14.append(("read", self.filename))
+        return b"".join(self._chunks)
+    async def release(self):
+        _log14.append(("release", self.filename))
+    async def read_chunk(self, size):
+        return self._chunks.pop(0) if self._chunks else b""
+class _Reader14:
+    def __init__(self, parts):
+        self._parts = list(parts)
+    async def next(self):
+        return self._parts.pop(0) if self._parts else None
+class _Req14:
+    def __init__(self, parts):
+        self._parts = parts
+    async def multipart(self):
+        return _Reader14(self._parts)
+_r14 = asyncio.run(_handlers14[("POST", "/ironleo78/revitalizer/upload")](_Req14([_UpPart("big_video.mp4", b"x" * 10), _UpPart("Clip_A_00001_video.latent", b"lat")])))
+_b14 = json.loads(_r14.text)
+check(_b14 == {"saved": ["Clip_A_00001_video.latent"], "refused": ["big_video.mp4"]}, "N4: the .latent is saved, the video refused (%s)" % _b14)
+check(("release", "big_video.mp4") in _log14 and ("read", "big_video.mp4") not in _log14, "N4: the refused file is released without being read into memory")
+
+# v0.4.15 (sweep P1o): one walk for both lists, reused for a moment, cleared by an upload
+_walks15 = []
+_real_walk15 = os.walk
+os.walk = lambda *a, **k: (_walks15.append(a[0]), _real_walk15(*a, **k))[1]
+try:
+    rv.forget_entries()
+    N.INPUT_TYPES()
+    _first15 = len(_walks15)
+    N.INPUT_TYPES()
+    check(_first15 == 2 and len(_walks15) == 2, "P1o: one walk of output/ + one of the upload folder for BOTH lists; a second /object_info right after walks nothing (%d, %d)" % (_first15, len(_walks15)))
+    rv.forget_entries()
+    N.INPUT_TYPES()
+    check(len(_walks15) == 4, "P1o: after an upload (forget_entries) the folders are walked again")
+finally:
+    os.walk = _real_walk15
+check(rv.scan_many(OUT, (rv.LATENT_SUFFIX, rv.COND_SUFFIX))[rv.LATENT_SUFFIX] == rv.scan(OUT, rv.LATENT_SUFFIX), "P1o: scan_many lists the same as scan")
 
 print("\nALL %d CHECKS PASSED" % ok)
